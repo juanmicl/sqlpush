@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <!-- sqlpush social preview: export to PNG (1280x640, &lt;1MB) before upload.
+       Fonts: Fira Code (wordmark, terminal) and Lato (taglines, footer) must
+       be installed locally for faithful SVG viewing and PNG regeneration. -->
+  <rect width="1280" height="640" fill="#0d1117"/>
+
+  <!-- wordmark -->
+  <text x="80" y="210" font-family="Fira Code, monospace"
+        font-size="128" font-weight="700" fill="#e6edf3">sql<tspan fill="#3fb950">push</tspan></text>
+
+  <!-- tagline -->
+  <text x="84" y="286" font-family="Lato, sans-serif"
+        font-size="44" fill="#8b949e">Prisma db push for SQLAlchemy</text>
+  <text x="84" y="332" font-family="Lato, sans-serif"
+        font-size="30" fill="#8b949e">risk-classified schema push for PostgreSQL / TimescaleDB</text>
+
+  <!-- terminal card -->
+  <rect x="80" y="380" width="1120" height="196" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+  <circle cx="112" cy="414" r="7" fill="#ff5f57"/>
+  <circle cx="138" cy="414" r="7" fill="#febc2e"/>
+  <circle cx="164" cy="414" r="7" fill="#28c840"/>
+
+  <text x="112" y="470" font-family="Fira Code, monospace" font-size="27">
+    <tspan fill="#3fb950">$</tspan><tspan fill="#e6edf3" dx="12">sqlpush push "app.models:metadata"</tspan>
+  </text>
+  <text x="112" y="510" font-family="Fira Code, monospace" font-size="25">
+    <tspan fill="#d29922">-- risky</tspan><tspan fill="#8b949e" dx="14">CREATE INDEX ix_hero_name ON hero (name);</tspan>
+  </text>
+  <text x="112" y="548" font-family="Fira Code, monospace" font-size="25">
+    <tspan fill="#3fb950">applied</tspan><tspan fill="#8b949e" dx="14">atomically, one advisory lock, no migration files</tspan>
+  </text>
+
+  <!-- footer -->
+  <text x="1200" y="606" text-anchor="end"
+        font-family="Lato, sans-serif"
+        font-size="24" fill="#6e7681">github.com/juanmicl/sqlpush</text>
+</svg>

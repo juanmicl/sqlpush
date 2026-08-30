@@ -1,0 +1,9 @@
+# docker-compose.yml
+services:
+  pg:
+    image: timescale/timescaledb:latest-pg16
+    ports: ["5433:5432"]
+    environment:
+      POSTGRES_USER: sqlpush
+      POSTGRES_PASSWORD: sqlpush
+      POSTGRES_DB: sqlpush_test

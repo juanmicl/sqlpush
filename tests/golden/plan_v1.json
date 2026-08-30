@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "drift": true,
+  "operations": [
+    {
+      "type": "add_column",
+      "risk": "safe",
+      "table": "t",
+      "column": "a",
+      "sql": "ALTER TABLE t ADD COLUMN a INT"
+    }
+  ],
+  "sql": "ALTER TABLE t ADD COLUMN a INT"
+}

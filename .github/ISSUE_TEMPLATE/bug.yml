@@ -1,0 +1,49 @@
+name: Bug report
+description: Something broke or behaved unexpectedly
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Also tell us what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The model definitions involved and the exact sqlpush command.
+      placeholder: |
+        # models
+        class hero(Base):
+            __tablename__ = "hero"
+            ...
+
+        $ sqlpush diff "app.models:metadata"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: sqlpush version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+    validations:
+      required: true
+  - type: input
+    id: db-version
+    attributes:
+      label: PostgreSQL / TimescaleDB version
+      description: "Output of SELECT version();"
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The command output. Add --json if it makes the problem clearer.
+      render: shell

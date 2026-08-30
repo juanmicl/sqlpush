@@ -1,0 +1,78 @@
+[project]
+name = "sqlpush"
+version = "0.1.0"
+description = "Schema lifecycle tool for production PostgreSQL/TimescaleDB on SQLAlchemy 2.0 (SQLModel included): diff, push and check schema drift straight from your models"
+readme = "README.md"
+authors = [
+    { name = "Juan Miguel Contreras", email = "19253629+juanmicl@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+license = "MIT"
+keywords = [
+    "sqlalchemy",
+    "alembic",
+    "postgresql",
+    "timescaledb",
+    "prisma",
+    "schema",
+    "migrations",
+    "database",
+    "drift",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "alembic>=1.18,<2",
+    "psycopg[binary]>=3.2",
+    "sqlalchemy>=2.0",
+    "typer>=0.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/juanmicl/sqlpush"
+Repository = "https://github.com/juanmicl/sqlpush"
+Issues = "https://github.com/juanmicl/sqlpush/issues"
+Changelog = "https://github.com/juanmicl/sqlpush/blob/main/CHANGELOG.md"
+
+[project.scripts]
+sqlpush = "sqlpush.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "jsonschema>=4.26.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.5",
+    "ty==0.0.42",
+]
+
+[tool.ty.src]
+include = ["src", "tests"]
+
+[tool.ty.environment]
+# match requires-python floor: the checker must never accept syntax
+# or stdlib APIs the oldest supported interpreter lacks
+python-version = "3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
