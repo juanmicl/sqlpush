@@ -6,6 +6,21 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `diff` / `check` / `push` no longer report false drift from
+  extension-managed state. TimescaleDB's implicit per-hypertable
+  time-column index (`<hypertable>_<dimension>_idx`) is pruned from
+  DB-only plans, and extension-owned namespaces (e.g. `topology` from
+  postgis_topology, which also `ALTER DATABASE`s itself onto the
+  search_path at install time) never enter the scope derived from the
+  live search_path. The reflection session's search_path is pinned to
+  the resolved scope — extension tables previously also resurfaced
+  through name visibility and were dropped twice (schema-qualified and
+  unqualified). Schemas passed explicitly via `schemas=` are never
+  filtered; the default schema (`public`) stays in scope even when
+  extensions are relocated into it.
+
 ## [0.1.0] - 2026-08-31
 
 First public release.

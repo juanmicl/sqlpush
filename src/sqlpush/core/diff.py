@@ -62,6 +62,90 @@ def _is_system_schema(schema: str) -> bool:
     return any(fnmatch.fnmatch(schema, pat) for pat in _SYSTEM_SCHEMAS)
 
 
+def _extension_owned_schemas(conn) -> frozenset[str]:
+    """Namespaces owned by an installed extension (live server truth).
+
+    Extensions that install into their own namespace (e.g.
+    postgis_topology -> ``topology``) manage it: its objects are
+    extension state, not user metadata. NB: extensions relocated into
+    the default schema (timescaledb, postgis, pg_trgm all live in
+    ``public``) do NOT own it — the default schema stays user scope.
+    """
+    rows = conn.execute(
+        text("SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace")
+    ).scalars()
+    return frozenset(rows)
+
+
+def _search_path_schemas(conn, default_schema: str, extension_schemas: frozenset[str]) -> list[str]:
+    """Derive the diff scope from the live search_path.
+
+    Same parsing as before (``"$user"`` dropped, whitespace stripped)
+    with one exclusion: extension-owned non-default schemas never enter
+    the scope. They usually appear on the search_path because their
+    extension ``ALTER DATABASE``d it there at install time
+    (postgis_topology does exactly that), not because the user scoped
+    them in. A schema the caller passes explicitly via ``schemas=`` is
+    never filtered here — explicit user intent wins.
+    """
+    # a live PG session always reports a search_path
+    search_path = conn.execute(text("SHOW search_path")).scalar()
+    assert search_path is not None
+    candidates = [s.strip() for s in search_path.split(",") if s.strip() and s.strip() != '"$user"']
+    return [s for s in candidates if s == default_schema or s not in extension_schemas]
+
+
+def _timescale_auto_indexes(conn) -> dict[str, str]:
+    """Map ``index name -> hypertable name`` for TimescaleDB's implicit
+    time-column indexes.
+
+    ``create_hypertable`` leaves one ``<hypertable>_<dimension>_idx``
+    per hypertable when the partitioning column had no index; models
+    never declare it (it is extension state, like the chunk schema), so
+    the DB-only branch of ``include_object`` must skip it. The catalog
+    column is ``primary_dimension`` (verified on TimescaleDB 2.25;
+    ``time_column_name`` does not exist on this view). Empty when the
+    extension is not installed.
+    """
+    installed = conn.execute(
+        text("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
+    ).first()
+    if installed is None:
+        return {}
+    rows = conn.execute(
+        text("SELECT hypertable_name, primary_dimension FROM timescaledb_information.hypertables")
+    ).all()
+    return {f"{hypertable}_{dimension}_idx": hypertable for hypertable, dimension in rows}
+
+
+def _restrict_search_path(conn, schemas: Sequence[str]) -> str:
+    """Pin the session search_path to the diff scope.
+
+    Alembic's unqualified reflection pass resolves table names via
+    ``pg_table_is_visible``, i.e. the SESSION search_path — which
+    ambient database-level settings can stretch beyond the declared
+    scope (postgis_topology ``ALTER DATABASE``s its own namespace onto
+    the search_path; its tables then surface both unqualified and
+    schema-qualified — one object, two drop ops). Pinning the session
+    to the resolved scope makes reflection see exactly what the scope
+    says. Returns the original setting for :func:`_restore_search_path`.
+    """
+    original = conn.execute(text("SHOW search_path")).scalar()
+    assert original is not None
+    preparer = conn.dialect.identifier_preparer
+    targets = ", ".join(preparer.quote(s) for s in schemas) or "''"
+    conn.exec_driver_sql(f"SET search_path TO {targets}")
+    return original
+
+
+def _restore_search_path(conn, original: str) -> None:
+    # SET is session-level and survives ROLLBACK: a pooled connection
+    # must never hand the restricted path to its next borrower. The
+    # value is SHOW's own output — already a valid identifier list —
+    # so round-tripping it verbatim is safe.
+    conn.exec_driver_sql(f"SET search_path TO {original}")
+
+
 def _make_include_name(schemas: frozenset[str], default_schema: str):
     def include_name(name, type_, parent_names):
         # Prune schemas (and everything inside them) BEFORE reflection:
@@ -80,7 +164,11 @@ def _make_include_name(schemas: frozenset[str], default_schema: str):
     return include_name
 
 
-def _make_include(schemas: frozenset[str], default_schema: str):
+def _make_include(
+    schemas: frozenset[str],
+    default_schema: str,
+    ts_auto_indexes: dict[str, str],
+):
     def include_object(obj, name, type_, reflected, compare_to):
         # Bound the diff to the target schemas on every branch: derive
         # the object's effective schema and require membership, for
@@ -98,7 +186,16 @@ def _make_include(schemas: frozenset[str], default_schema: str):
             # DB-only object: skip system tables. NB: alembic also
             # auto-excludes its own version table from autogen; the
             # name check here is defense in depth.
-            return name not in _SYSTEM_TABLES
+            if name in _SYSTEM_TABLES:
+                return False
+            # Skip TimescaleDB's implicit time-column index: extension
+            # state no model declares. Name AND parent table must both
+            # match, so a same-named index on another table stays real
+            # drift, as does one the metadata actually declares (that
+            # arrives in the both-present branch above).
+            parent_table = getattr(getattr(obj, "table", None), "name", None)
+            is_auto_index = ts_auto_indexes.get(name) == parent_table
+            return not (type_ == "index" and is_auto_index)
         return True
 
     return include_object
@@ -136,36 +233,38 @@ class DiffEngine:
         schemas: Sequence[str] | None = None,
         exclude: Sequence[str] = (),
     ) -> Plan:
-        if schemas is None:
-            with engine.connect() as conn:
-                search_path = conn.execute(text("SHOW search_path")).scalar()
-                # a live PG session always reports a search_path
-                assert search_path is not None
-                schemas = [
-                    s.strip()
-                    for s in search_path.split(",")
-                    if s.strip() and s.strip() != '"$user"'
-                ]
-        # New binding rather than a param reassignment: frozenset is a
-        # Set, not a Sequence, and the helpers below declare the exact
-        # type they take.
-        schema_set = frozenset(schemas)
         exclude = tuple(exclude)
         # Typed `str | None` by SQLAlchemy; a dialect without a default
         # schema is meaningless for this PostgreSQL-only tool; "public"
         # matches every supported server config.
         default_schema = engine.dialect.default_schema_name or "public"
 
-        opts = {
-            "compare_type": True,
-            "compare_server_default": True,
-            "include_name": _make_include_name(schema_set, default_schema),
-            "include_object": _make_include(schema_set, default_schema),
-            "include_schemas": True,
-        }
+        # One connection for the whole plan: the scope derivation, the
+        # catalog probes and the reflection must all see the same
+        # session — the search_path pinning below would be meaningless
+        # on a second connection.
         with engine.connect() as conn:
-            ctx = MigrationContext.configure(conn, opts=opts)
-            script = produce_migrations(ctx, metadata)
+            if schemas is None:
+                schemas = _search_path_schemas(conn, default_schema, _extension_owned_schemas(conn))
+            # New binding rather than a param reassignment: frozenset is
+            # a Set, not a Sequence, and the helpers below declare the
+            # exact type they take.
+            schema_set = frozenset(schemas)
+            ts_auto_indexes = _timescale_auto_indexes(conn)
+
+            opts = {
+                "compare_type": True,
+                "compare_server_default": True,
+                "include_name": _make_include_name(schema_set, default_schema),
+                "include_object": _make_include(schema_set, default_schema, ts_auto_indexes),
+                "include_schemas": True,
+            }
+            original_search_path = _restrict_search_path(conn, schemas)
+            try:
+                ctx = MigrationContext.configure(conn, opts=opts)
+                script = produce_migrations(ctx, metadata)
+            finally:
+                _restore_search_path(conn, original_search_path)
 
         # produce_migrations always builds the upgrade bundle
         assert script.upgrade_ops is not None
