@@ -95,17 +95,15 @@ def _search_path_schemas(conn, default_schema: str, extension_schemas: frozenset
     return [s for s in candidates if s == default_schema or s not in extension_schemas]
 
 
-def _timescale_auto_indexes(conn) -> dict[str, str]:
-    """Map ``index name -> hypertable name`` for TimescaleDB's implicit
-    time-column indexes.
+def _timescale_auto_indexes(conn) -> dict[str, set[str]]:
+    """``{schema.index_name}`` -> set of ``{schema.hypertable}`` owners.
 
-    ``create_hypertable`` leaves one ``<hypertable>_<dimension>_idx``
-    per hypertable when the partitioning column had no index; models
-    never declare it (it is extension state, like the chunk schema), so
-    the DB-only branch of ``include_object`` must skip it. The catalog
-    column is ``primary_dimension`` (verified on TimescaleDB 2.25;
-    ``time_column_name`` does not exist on this view). Empty when the
-    extension is not installed.
+    TimescaleDB's implicit per-hypertable time-column index
+    (``<hypertable>_<dimension>_idx``). Set-valued: distinct hypertables
+    can produce the SAME index name (table ``a`` dim ``b_c`` vs table
+    ``a_b`` dim ``c`` both yield ``a_b_c_idx``) — a str value would
+    last-win and leak the other as false drift. Qualified keys carry
+    cross-schema hypertables. Empty when the extension is absent.
     """
     installed = conn.execute(
         text("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
@@ -113,9 +111,17 @@ def _timescale_auto_indexes(conn) -> dict[str, str]:
     if installed is None:
         return {}
     rows = conn.execute(
-        text("SELECT hypertable_name, primary_dimension FROM timescaledb_information.hypertables")
+        text(
+            "SELECT hypertable_schema, hypertable_name, primary_dimension "
+            "FROM timescaledb_information.hypertables"
+        )
     ).all()
-    return {f"{hypertable}_{dimension}_idx": hypertable for hypertable, dimension in rows}
+    out: dict[str, set[str]] = {}
+    for schema, hypertable, dimension in rows:
+        out.setdefault(f"{schema}.{hypertable}_{dimension}_idx", set()).add(
+            f"{schema}.{hypertable}"
+        )
+    return out
 
 
 def _restrict_search_path(conn, schemas: Sequence[str]) -> str:
@@ -143,7 +149,13 @@ def _restore_search_path(conn, original: str) -> None:
     # must never hand the restricted path to its next borrower. The
     # value is SHOW's own output — already a valid identifier list —
     # so round-tripping it verbatim is safe.
-    conn.exec_driver_sql(f"SET search_path TO {original}")
+    try:
+        conn.exec_driver_sql(f"SET search_path TO {original}")
+    except Exception:  # noqa: BLE001,S110
+        # A dead connection cannot be restored, and a restore failure must
+        # NEVER mask the root error from produce_migrations. Server-side
+        # session teardown drops the restricted path anyway.
+        pass
 
 
 def _make_include_name(schemas: frozenset[str], default_schema: str):
@@ -167,7 +179,7 @@ def _make_include_name(schemas: frozenset[str], default_schema: str):
 def _make_include(
     schemas: frozenset[str],
     default_schema: str,
-    ts_auto_indexes: dict[str, str],
+    ts_auto_indexes: dict[str, set[str]],
 ):
     def include_object(obj, name, type_, reflected, compare_to):
         # Bound the diff to the target schemas on every branch: derive
@@ -189,13 +201,17 @@ def _make_include(
             if name in _SYSTEM_TABLES:
                 return False
             # Skip TimescaleDB's implicit time-column index: extension
-            # state no model declares. Name AND parent table must both
-            # match, so a same-named index on another table stays real
-            # drift, as does one the metadata actually declares (that
-            # arrives in the both-present branch above).
-            parent_table = getattr(getattr(obj, "table", None), "name", None)
-            is_auto_index = ts_auto_indexes.get(name) == parent_table
-            return not (type_ == "index" and is_auto_index)
+            # state no model declares. Qualified name AND owner set must
+            # both match, so a same-named index on another table stays
+            # real drift, as does one the metadata actually declares
+            # (that arrives in the both-present branch above).
+            parent = getattr(obj, "table", None)
+            parent_table = getattr(parent, "name", None)
+            parent_schema = getattr(parent, "schema", None) or default_schema
+            qualified_index = f"{parent_schema}.{name}"
+            qualified_parent = f"{parent_schema}.{parent_table}"
+            owners = ts_auto_indexes.get(qualified_index, frozenset())
+            return not (type_ == "index" and qualified_parent in owners)
         return True
 
     return include_object

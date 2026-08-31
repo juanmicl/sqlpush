@@ -20,6 +20,18 @@ the project follows [Semantic Versioning](https://semver.org/).
   unqualified). Schemas passed explicitly via `schemas=` are never
   filtered; the default schema (`public`) stays in scope even when
   extensions are relocated into it.
+- The auto-index prune now keys the map by qualified
+  `{schema}.{index}` with a **set** of qualified hypertable owners, so
+  the same heuristic index name produced from distinct hypertables
+  (table `a` dimension `b_c` and table `a_b` dimension `c` both compute
+  to `a_b_c_idx`) no longer leaks one of them as false drift: with a
+  str value the last row won and the other owner's index was planned
+  (as destructive `DROP INDEX`). Heuristic note: a user-created DB-only
+  index whose name is exactly `<table>_<dimension>_idx` on a known
+  hypertable is pruned as extension state; indexes declared in the
+  metadata are never affected. Additionally, a failure while restoring
+  the reflection session's search_path no longer masks the root error
+  from the diff itself.
 
 ## [0.1.0] - 2026-08-31
 

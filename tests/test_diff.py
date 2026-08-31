@@ -230,3 +230,56 @@ def test_timescale_auto_time_index_not_drift(pg_engine):
     finally:
         with pg_engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS tsauto"))
+
+
+@pytest.mark.timescale
+def test_timescale_auto_index_same_name_collision_not_drift(pg_engine):
+    # Dos hypertables producen el MISMO nombre de índice auto: a(b_c) y
+    # a_b(c) → ambas dejan a_b_c_idx. En un MISMO schema PostgreSQL no
+    # permite dos índices con el mismo nombre (sufija el segundo con
+    # a_b_c_idx1), pero en schemas distintos ambos conservan el nombre
+    # exacto — esa es la colisión física real. Ambas deben podarse
+    # (mapa unqualified str-last-wins dejaría una como falso drift).
+    with pg_engine.begin() as conn:
+        for schema in ("s1", "s2"):
+            conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            conn.execute(text(f"CREATE SCHEMA {schema}"))
+        conn.execute(
+            text("CREATE TABLE s1.a (id integer, b_c timestamptz NOT NULL, PRIMARY KEY (id, b_c))")
+        )
+        conn.execute(
+            text("CREATE TABLE s2.a_b (id integer, c timestamptz NOT NULL, PRIMARY KEY (id, c))")
+        )
+        conn.execute(text("SELECT create_hypertable('s1.a', 'b_c')"))
+        conn.execute(text("SELECT create_hypertable('s2.a_b', 'c')"))
+    try:
+        with pg_engine.connect() as conn:
+            both = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_indexes WHERE indexname = 'a_b_c_idx' "
+                    "AND schemaname IN ('s1', 's2')"
+                )
+            ).scalar()
+        assert both == 2  # sanity: ambas existen (non-vacuous)
+
+        md = MetaData()
+        Table(
+            "a",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("b_c", DateTime(timezone=True), nullable=False, primary_key=True),
+            schema="s1",
+        )
+        Table(
+            "a_b",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("c", DateTime(timezone=True), nullable=False, primary_key=True),
+            schema="s2",
+        )
+        plan = DiffEngine().plan(md, pg_engine, schemas=("s1", "s2"))
+        assert plan.drift is False
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA IF EXISTS s1 CASCADE"))
+            conn.execute(text("DROP SCHEMA IF EXISTS s2 CASCADE"))
