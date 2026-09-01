@@ -6,6 +6,22 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Implicit spatial index pruning, catalog-driven: single-column
+  GiST indexes named exactly `<table>_<column>_idx` on a `geometry` /
+  `geography` column — what geoalchemy2 (<0.18 or `spatial_index=True`)
+  creates at table-create time and no model declares — are pruned from
+  DB-only plans as extension/library state, same as the TimescaleDB
+  auto-indexes. Detection queries the catalogs (`pg_index` ⋈ `pg_class`
+  ⋈ `pg_attribute` ⋈ `pg_type`), so it keys on the column TYPE, never
+  on the name alone: the same index name on a non-spatial column stays
+  real drift, and indexes declared in the metadata are never affected.
+  It also works regardless of geoalchemy2 being importable in the
+  sqlpush process. The test image switched to
+  `timescale/timescaledb-ha:pg17` (the PostGIS-carrying HA image) so
+  the behavior is exercised in CI.
+
 ### Fixed
 
 - `diff` / `check` / `push` no longer report false drift from
@@ -31,7 +47,9 @@ the project follows [Semantic Versioning](https://semver.org/).
   hypertable is pruned as extension state; indexes declared in the
   metadata are never affected. Additionally, a failure while restoring
   the reflection session's search_path no longer masks the root error
-  from the diff itself.
+  from the diff itself. A TimescaleDB-suffixed auto index
+  (`<table>_<dim>_idx1` from a same-schema name near-collision) still
+  surfaces as false drift — known limitation.
 
 ## [0.1.0] - 2026-08-31
 

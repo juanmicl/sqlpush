@@ -283,3 +283,88 @@ def test_timescale_auto_index_same_name_collision_not_drift(pg_engine):
         with pg_engine.begin() as conn:
             conn.execute(text("DROP SCHEMA IF EXISTS s1 CASCADE"))
             conn.execute(text("DROP SCHEMA IF EXISTS s2 CASCADE"))
+
+
+@pytest.fixture()
+def spatial_db(clean_db):
+    """Una columna geometry con su índice GiST implícito geoalchemy2-style
+    (<table>_<col>_idx), MÁS el control: mismo nombre de índice sobre una
+    columna integer — el prune debe key-ar en el TIPO, no en el nombre."""
+    with clean_db.begin() as conn:
+        try:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+        except Exception:  # noqa: BLE001  # availability probe must catch any failure
+            pytest.skip("postgis no disponible en este container")
+        for tbl in ("geomtbl", "ctrltbl"):
+            conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
+        conn.execute(
+            text("CREATE TABLE geomtbl (id integer PRIMARY KEY, geom geometry(Point, 4326))")
+        )
+        conn.execute(text("CREATE INDEX geomtbl_geom_idx ON geomtbl USING GIST (geom)"))
+        conn.execute(text("CREATE TABLE ctrltbl (id integer PRIMARY KEY, geom integer)"))
+        conn.execute(text("CREATE INDEX ctrltbl_geom_idx ON ctrltbl (geom)"))
+    yield clean_db
+    with clean_db.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS geomtbl"))
+        conn.execute(text("DROP TABLE IF EXISTS ctrltbl"))
+
+
+@pytest.mark.filterwarnings("ignore:Did not recognize type")
+def test_spatial_auto_index_not_drift(spatial_db):
+    md = MetaData()
+    Table("geomtbl", md, Column("id", Integer, primary_key=True))
+    plan = DiffEngine().plan(md, spatial_db)
+    assert all(not (op.type == "drop_index" and op.table == "geomtbl") for op in plan.operations), (
+        "el índice GiST implícito sobre geometry debe podarse"
+    )
+
+
+@pytest.mark.filterwarnings("ignore:Did not recognize type")
+def test_spatial_auto_index_control_non_geometry_still_drift(spatial_db):
+    md = MetaData()
+    Table("ctrltbl", md, Column("id", Integer, primary_key=True))
+    plan = DiffEngine().plan(md, spatial_db)
+    assert any(op.type == "drop_index" and op.table == "ctrltbl" for op in plan.operations), (
+        "mismo nombre sobre columna NO geometry = drift real (control)"
+    )
+
+
+@pytest.mark.timescale
+@pytest.mark.xfail(
+    strict=True,
+    reason="suffix leak: PG renames the second same-name auto index to a_b_c_idx1, "
+    "which the exact-name prune cannot see (documented limitation, "
+    "follow-up: suffix-aware matcher)",
+)
+def test_same_schema_auto_index_suffix_leak_is_known_limitation(pg_engine):
+    with pg_engine.begin() as conn:
+        for tbl in ("a", "a_b"):
+            conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
+        conn.execute(
+            text("CREATE TABLE a (id integer, b_c timestamptz NOT NULL, PRIMARY KEY (id, b_c))")
+        )
+        conn.execute(
+            text("CREATE TABLE a_b (id integer, c timestamptz NOT NULL, PRIMARY KEY (id, c))")
+        )
+        conn.execute(text("SELECT create_hypertable('a', 'b_c')"))
+        conn.execute(text("SELECT create_hypertable('a_b', 'c')"))
+    try:
+        md = MetaData()
+        Table(
+            "a",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("b_c", DateTime(timezone=True), nullable=False, primary_key=True),
+        )
+        Table(
+            "a_b",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("c", DateTime(timezone=True), nullable=False, primary_key=True),
+        )
+        plan = DiffEngine().plan(md, pg_engine)
+        assert plan.drift is False  # XPASS would mean the limitation is gone — update the xfail
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS a"))
+            conn.execute(text("DROP TABLE IF EXISTS a_b"))

@@ -124,6 +124,32 @@ def _timescale_auto_indexes(conn) -> dict[str, set[str]]:
     return out
 
 
+def _spatial_auto_indexes(conn) -> frozenset[str]:
+    """Qualified names of geoalchemy2-style implicit spatial indexes.
+
+    Single-column indexes named ``<table>_<col>_idx`` on a geometry or
+    geography column — what geoalchemy2 (<0.18 or ``spatial_index=True``)
+    creates at table-create time and no model ever declares. Catalog-driven
+    (pg_type), so detection never depends on geoalchemy2 being importable
+    in this process.
+    """
+    rows = conn.execute(
+        text(
+            "SELECT n.nspname, i2.relname "
+            "FROM pg_index i "
+            "JOIN pg_class t ON t.oid = i.indrelid "
+            "JOIN pg_namespace n ON n.oid = t.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey) "
+            "JOIN pg_class i2 ON i2.oid = i.indexrelid "
+            "JOIN pg_type ty ON ty.oid = a.atttypid "
+            "WHERE i.indnatts = 1 "
+            "AND ty.typname IN ('geometry', 'geography') "
+            "AND i2.relname = format('%s_%s_idx', t.relname, a.attname)"
+        )
+    ).all()
+    return frozenset(f"{nsp}.{idx}" for nsp, idx in rows)
+
+
 def _restrict_search_path(conn, schemas: Sequence[str]) -> str:
     """Pin the session search_path to the diff scope.
 
@@ -180,6 +206,7 @@ def _make_include(
     schemas: frozenset[str],
     default_schema: str,
     ts_auto_indexes: dict[str, set[str]],
+    spatial_auto_indexes: frozenset[str],
 ):
     def include_object(obj, name, type_, reflected, compare_to):
         # Bound the diff to the target schemas on every branch: derive
@@ -210,6 +237,8 @@ def _make_include(
             parent_schema = getattr(parent, "schema", None) or default_schema
             qualified_index = f"{parent_schema}.{name}"
             qualified_parent = f"{parent_schema}.{parent_table}"
+            if type_ == "index" and qualified_index in spatial_auto_indexes:
+                return False
             owners = ts_auto_indexes.get(qualified_index, frozenset())
             return not (type_ == "index" and qualified_parent in owners)
         return True
@@ -267,12 +296,15 @@ class DiffEngine:
             # exact type they take.
             schema_set = frozenset(schemas)
             ts_auto_indexes = _timescale_auto_indexes(conn)
+            spatial_auto_indexes = _spatial_auto_indexes(conn)
 
             opts = {
                 "compare_type": True,
                 "compare_server_default": True,
                 "include_name": _make_include_name(schema_set, default_schema),
-                "include_object": _make_include(schema_set, default_schema, ts_auto_indexes),
+                "include_object": _make_include(
+                    schema_set, default_schema, ts_auto_indexes, spatial_auto_indexes
+                ),
                 "include_schemas": True,
             }
             original_search_path = _restrict_search_path(conn, schemas)
