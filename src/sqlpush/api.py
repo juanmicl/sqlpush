@@ -21,11 +21,13 @@ from sqlpush.chain.format import (
     next_revision_id,
     render_migration_file,
 )
+from sqlpush.chain.migrate import run_migrate
 from sqlpush.core.diff import DiffEngine
 from sqlpush.directives.timescale import hypertable_operations
 from sqlpush.types import (
     CheckResult,
     ConnectFailed,
+    MigrateReport,
     Plan,
     Report,
     SqlpushError,
@@ -159,6 +161,24 @@ def revision(
     except OSError as exc:
         raise SqlpushError(f"cannot write migration file {path}: {exc}") from exc
     return path
+
+
+def migrate(target, *, chain_dir="migrations/versions", allow_destructive=False) -> MigrateReport:
+    """Replay annotated-SQL chain files with gates + same-txn bookkeeping.
+
+    ``target`` is a DSN string, sync ``Engine`` or ``AsyncEngine`` (resolved
+    via ``_sync_engine_from``; engines created here are disposed). See
+    ``chain.migrate.run_migrate`` for the execution contract.
+    """
+    engine, dispose = _sync_engine_from(target)
+    try:
+        return run_migrate(engine, chain_dir=chain_dir, allow_destructive=allow_destructive)
+    except SQLAlchemyError as exc:
+        # MigrationFileError/SqlpushError (typed) pass through untouched
+        _raise_typed(exc)
+    finally:
+        if dispose:
+            engine.dispose()
 
 
 def _sync_engine_from(target):

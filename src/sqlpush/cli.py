@@ -3,7 +3,8 @@
 
 Exit codes: diff always 0; check 0 clean / 2 drift / 3 destructive drift;
 push 0 applied / 1 destructive blocked / 2 error (incl. partial failure);
-revision 0 written / 1 error (empty drift refuses).
+revision 0 written / 1 error (empty drift refuses); migrate 0 clean /
+1 blocked or partial failure.
 """
 
 from __future__ import annotations
@@ -242,6 +243,29 @@ def revision(
     finally:
         engine.dispose()
     typer.echo(str(path))
+    raise typer.Exit(code=0)
+
+
+@app.command()
+def migrate(
+    dsn: str | None = typer.Option(None),
+    allow_destructive: bool = typer.Option(False, "--allow-destructive"),
+    out_dir: DirOpt = Path("migrations/versions"),
+):
+    """Replay pending migration files (gates + checksum bookkeeping)."""
+    engine = _engine(dsn)
+    try:
+        report = api.migrate(engine, chain_dir=out_dir, allow_destructive=allow_destructive)
+    finally:
+        engine.dispose()
+    typer.echo(
+        f"applied: {len(report.applied)}, skipped: {len(report.skipped)}, "
+        f"blocked: {len(report.blocked)}, partial_failure: {report.partial_failure}"
+    )
+    for note in report.notes:
+        typer.secho(note, fg="yellow", err=True)
+    if report.blocked or report.partial_failure:
+        raise typer.Exit(code=1)
     raise typer.Exit(code=0)
 
 
