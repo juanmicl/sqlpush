@@ -152,6 +152,40 @@ def test_column_drift_in_non_default_schema_planned(other_schema):
     assert any(op.type == "add_column" and op.column == "age" for op in plan.operations)
 
 
+def test_mixed_scope_in_sync(other_schema):
+    # Regression pin for the search_path blocker: with a mixed scope
+    # (public + a non-default schema) the old full-scope pin let the
+    # None-schema pass resolve other.hero as a public table via
+    # pg_table_is_visible → false destructive DROP TABLE on an
+    # in-sync DB. Pinning the session to the default schema only must
+    # keep a mixed in-sync scope clean.
+    md = MetaData()
+    Table(
+        "hero",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("name", String(50)),
+        schema="other",
+    )
+    md.create_all(other_schema)
+    plan = DiffEngine().plan(md, other_schema, schemas=("public", "other"))
+    assert plan.operations == ()
+    assert plan.drift is False
+
+
+def test_mixed_scope_db_only_single_qualified_drop(other_schema):
+    # DB-only table in the scoped non-default schema: exactly ONE op,
+    # schema-qualified. The None-schema pass must not also resolve it
+    # as an unqualified default-schema duplicate drop.
+    with other_schema.begin() as conn:
+        conn.execute(text("CREATE TABLE other.orphan (id integer PRIMARY KEY)"))
+    plan = DiffEngine().plan(MetaData(), other_schema, schemas=("public", "other"))
+    assert len(plan.operations) == 1
+    drop = plan.operations[0]
+    assert drop.type == "drop_table"
+    assert drop.sql == "DROP TABLE other.orphan"
+
+
 @pytest.fixture()
 def extension_schema_db(clean_db):
     """pg_trgm installed into its own namespace with a table in it, and
@@ -193,6 +227,18 @@ def test_extension_owned_schema_never_derives_into_scope(extension_schema_db):
         conn.execute(text("DROP EXTENSION pg_trgm"))
     plan = DiffEngine().plan(_md(), extension_schema_db)
     assert any(op.type == "drop_table" and op.table == "tbl" for op in plan.operations)
+
+
+def test_explicit_schema_scope_includes_extension_owned(extension_schema_db):
+    # Explicit user intent wins over extension-ownership pruning: extown
+    # handed in via schemas= keeps its DB-only table in the plan — as a
+    # single schema-qualified drop (the session stays pinned to the
+    # default schema, so the unqualified visibility duplicate cannot
+    # appear either).
+    plan = DiffEngine().plan(MetaData(), extension_schema_db, schemas=("public", "extown"))
+    drops = [op for op in plan.operations if op.type == "drop_table"]
+    assert len(drops) == 1
+    assert drops[0].sql == "DROP TABLE extown.tbl"
 
 
 @pytest.mark.timescale

@@ -150,38 +150,55 @@ def _spatial_auto_indexes(conn) -> frozenset[str]:
     return frozenset(f"{nsp}.{idx}" for nsp, idx in rows)
 
 
-def _restrict_search_path(conn, schemas: Sequence[str]) -> str:
-    """Pin the session search_path to the diff scope.
+def _restrict_search_path(conn, default_schema: str, schemas: frozenset[str]) -> str | None:
+    """Confine the default-schema reflection pass to the default schema.
 
-    Alembic's unqualified reflection pass resolves table names via
-    ``pg_table_is_visible``, i.e. the SESSION search_path — which
-    ambient database-level settings can stretch beyond the declared
-    scope (postgis_topology ``ALTER DATABASE``s its own namespace onto
-    the search_path; its tables then surface both unqualified and
-    schema-qualified — one object, two drop ops). Pinning the session
-    to the resolved scope makes reflection see exactly what the scope
-    says. Returns the original setting for :func:`_restore_search_path`.
+    Alembic's unqualified (None-schema) reflection pass resolves table
+    names via ``pg_table_is_visible``, i.e. the SESSION search_path —
+    which ambient database-level settings can stretch beyond the
+    declared scope (postgis_topology ``ALTER DATABASE``s its own
+    namespace onto the search_path; its tables then surface both
+    unqualified and schema-qualified — one object, two drop ops).
+    ``pg_table_is_visible`` cannot deliver "reflection sees exactly
+    what the scope says" for a multi-schema scope: pinning the full
+    scope list would let the None-pass resolve NON-default tables as
+    unqualified default-schema tables — false destructive drops plus
+    duplicate unqualified drops in mixed scopes. So pin to the default
+    schema alone, and only when it is a scope member; otherwise the
+    None-pass is filtered out by ``_make_include_name`` before
+    reflection runs, so there is nothing visibility-based to confine
+    and no pin (nor restore) happens. Schema-qualified reflection is
+    unaffected either way. Returns the original setting for
+    :func:`_restore_search_path`, or ``None`` when nothing was pinned.
     """
+    if default_schema not in schemas:
+        return None
     original = conn.execute(text("SHOW search_path")).scalar()
     assert original is not None
     preparer = conn.dialect.identifier_preparer
-    targets = ", ".join(preparer.quote(s) for s in schemas) or "''"
-    conn.exec_driver_sql(f"SET search_path TO {targets}")
+    conn.exec_driver_sql(f"SET search_path TO {preparer.quote(default_schema)}")
     return original
 
 
-def _restore_search_path(conn, original: str) -> None:
+def _restore_search_path(conn, original: str | None) -> None:
+    # original None => nothing was pinned, nothing to restore.
+    if original is None:
+        return
     # SET is session-level and survives ROLLBACK: a pooled connection
     # must never hand the restricted path to its next borrower. The
     # value is SHOW's own output — already a valid identifier list —
     # so round-tripping it verbatim is safe.
     try:
         conn.exec_driver_sql(f"SET search_path TO {original}")
-    except Exception:  # noqa: BLE001,S110
+    except Exception:  # noqa: BLE001
         # A dead connection cannot be restored, and a restore failure must
-        # NEVER mask the root error from produce_migrations. Server-side
-        # session teardown drops the restricted path anyway.
-        pass
+        # NEVER mask the root error from produce_migrations. A LIVE pooled
+        # connection whose restore failed must be discarded, not returned
+        # to the pool still carrying the restricted path (SET survives
+        # ROLLBACK) — hence invalidate(), which forces the pool to drop
+        # it transparently. Server-side session teardown drops the
+        # restricted path anyway.
+        conn.invalidate()
 
 
 def _make_include_name(schemas: frozenset[str], default_schema: str):
@@ -307,7 +324,7 @@ class DiffEngine:
                 ),
                 "include_schemas": True,
             }
-            original_search_path = _restrict_search_path(conn, schemas)
+            original_search_path = _restrict_search_path(conn, default_schema, schema_set)
             try:
                 ctx = MigrationContext.configure(conn, opts=opts)
                 script = produce_migrations(ctx, metadata)

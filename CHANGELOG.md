@@ -31,9 +31,16 @@ the project follows [Semantic Versioning](https://semver.org/).
   postgis_topology, which also `ALTER DATABASE`s itself onto the
   search_path at install time) never enter the scope derived from the
   live search_path. The reflection session's search_path is pinned to
-  the resolved scope — extension tables previously also resurfaced
-  through name visibility and were dropped twice (schema-qualified and
-  unqualified). Schemas passed explicitly via `schemas=` are never
+  the default schema alone — never to the full scope list, and only
+  when the default schema is a scope member: the default-schema
+  (unqualified) reflection pass resolves table names via session
+  visibility, so a full-scope pin made non-default tables masquerade
+  as default-schema tables in mixed scopes (`public` plus another
+  schema), producing false destructive `DROP TABLE`s and duplicate
+  unqualified drops. The default-schema-only pin also keeps extension
+  tables from resurfacing through name visibility and being dropped
+  twice (schema-qualified and unqualified). Schemas passed explicitly
+  via `schemas=` are never
   filtered; the default schema (`public`) stays in scope even when
   extensions are relocated into it.
 - The auto-index prune now keys the map by qualified
@@ -47,7 +54,9 @@ the project follows [Semantic Versioning](https://semver.org/).
   hypertable is pruned as extension state; indexes declared in the
   metadata are never affected. Additionally, a failure while restoring
   the reflection session's search_path no longer masks the root error
-  from the diff itself. A TimescaleDB-suffixed auto index
+  from the diff itself, and the affected pooled connection is
+  discarded (invalidated) instead of being recycled with the
+  restricted path. A TimescaleDB-suffixed auto index
   (`<table>_<dim>_idx1` from a same-schema name near-collision) still
   surfaces as false drift — known limitation.
 
