@@ -269,6 +269,28 @@ def migrate(
     raise typer.Exit(code=0)
 
 
+@app.command()
+def stamp(
+    dsn: str | None = typer.Option(None),
+    out_dir: DirOpt = Path("migrations/versions"),
+):
+    """Adopt an existing DB: register chain files without executing SQL."""
+    engine = _engine(dsn)
+    try:
+        report = api.stamp(engine, chain_dir=out_dir)
+    finally:
+        engine.dispose()
+    typer.echo(
+        f"applied: {len(report.applied)}, skipped (registered): {len(report.skipped)}, "
+        f"blocked: {len(report.blocked)}, partial_failure: {report.partial_failure}"
+    )
+    for note in report.notes:
+        typer.secho(note, fg="yellow", err=True)
+    if report.blocked or report.partial_failure:
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=0)
+
+
 def main() -> None:  # [project.scripts] entry point
     try:
         app()

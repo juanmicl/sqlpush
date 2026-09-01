@@ -21,7 +21,7 @@ from sqlpush.chain.format import (
     next_revision_id,
     render_migration_file,
 )
-from sqlpush.chain.migrate import run_migrate
+from sqlpush.chain.migrate import run_migrate, run_stamp
 from sqlpush.core.diff import DiffEngine
 from sqlpush.directives.timescale import hypertable_operations
 from sqlpush.types import (
@@ -173,6 +173,24 @@ def migrate(target, *, chain_dir="migrations/versions", allow_destructive=False)
     engine, dispose = _sync_engine_from(target)
     try:
         return run_migrate(engine, chain_dir=chain_dir, allow_destructive=allow_destructive)
+    except SQLAlchemyError as exc:
+        # MigrationFileError/SqlpushError (typed) pass through untouched
+        _raise_typed(exc)
+    finally:
+        if dispose:
+            engine.dispose()
+
+
+def stamp(target, *, chain_dir="migrations/versions") -> MigrateReport:
+    """Bootstrap: register chain files as applied WITHOUT executing SQL.
+
+    For adopting a DB whose schema already reflects the chain. ``target``
+    resolution and error typing match :func:`migrate`. See
+    ``chain.migrate.run_stamp`` for the report convention.
+    """
+    engine, dispose = _sync_engine_from(target)
+    try:
+        return run_stamp(engine, chain_dir=chain_dir)
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched
         _raise_typed(exc)
