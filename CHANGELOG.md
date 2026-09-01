@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-01
+
 ### Fixed
 
 - `push` no longer fails with `DuplicateTable` on tables whose indexes
