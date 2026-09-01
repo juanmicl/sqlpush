@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import NoReturn
 
@@ -138,18 +139,25 @@ def revision(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     rev_id = next_revision_id(out)
-    slug = (message or "migration").lower().replace(" ", "_")[:40]
+    slug = re.sub(r"[^a-z0-9_]+", "_", (message or "migration").lower())[:40]
     path = out / f"{rev_id}_{slug}.sql"
+    if path.exists():
+        # NNNN+slug collision (e.g. same message re-run without the file being
+        # consumed) must be loud, never a silent overwrite of chain history
+        raise SqlpushError(f"refusing to overwrite existing migration file {path}")
     prev_n = int(rev_id) - 1
-    path.write_text(
-        render_migration_file(
-            ops=ops,
-            revision_id=rev_id,
-            risk=risk,
-            message=message,
-            parent=f"{prev_n:04d}" if prev_n >= 1 else None,
+    try:
+        path.write_text(
+            render_migration_file(
+                ops=ops,
+                revision_id=rev_id,
+                risk=risk,
+                message=message,
+                parent=f"{prev_n:04d}" if prev_n >= 1 else None,
+            )
         )
-    )
+    except OSError as exc:
+        raise SqlpushError(f"cannot write migration file {path}: {exc}") from exc
     return path
 
 

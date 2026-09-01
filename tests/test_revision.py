@@ -56,3 +56,20 @@ def test_revision_header_risk_is_max(clean_db, tmp_path):
         conn.execute(text("CREATE TABLE doomed (id integer PRIMARY KEY)"))
     out = revision(MetaData(), clean_db, out_dir=tmp_path, message="drop doomed")
     assert "risk=DESTRUCTIVE" in out.read_text()
+
+
+def test_revision_mixed_plan_header_risk_is_max(clean_db, tmp_path):
+    # plan MIXTO: add SAFE (revt falta) + drop DESTRUCTIVE (doomed sobra)
+    # → el header debe llevar el MÁXIMO por RISK_RANK, no la primera op
+    with clean_db.begin() as conn:
+        conn.execute(text("CREATE TABLE doomed (id integer PRIMARY KEY)"))
+    out = revision(_md_with_table(), clean_db, out_dir=tmp_path, message="mixed")
+    assert "risk=DESTRUCTIVE" in out.read_text()
+
+
+def test_revision_slug_rejects_path_separators(clean_db, tmp_path):
+    # message con "/" pre-fix producía un path inexistente → FileNotFoundError
+    # untyped; el slug debe transcribirse a un filename seguro
+    out = revision(_md_with_table(), clean_db, out_dir=tmp_path, message="feature/foo")
+    assert "/" not in out.name
+    assert out.name == "0001_feature_foo.sql"
