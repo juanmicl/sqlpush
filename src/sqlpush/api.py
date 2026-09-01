@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import NoReturn
 
 from sqlalchemy import MetaData
@@ -14,6 +15,11 @@ from sqlalchemy.exc import (
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from sqlpush.apply.executor import apply_plan, with_advisory_lock
+from sqlpush.chain.format import (
+    RISK_RANK,
+    next_revision_id,
+    render_migration_file,
+)
 from sqlpush.core.diff import DiffEngine
 from sqlpush.directives.timescale import hypertable_operations
 from sqlpush.types import (
@@ -114,6 +120,37 @@ def check(metadata, engine, *, schemas=None, exclude=()) -> CheckResult:
         drift=p.drift,
         has_destructive=p.has_destructive,
     )
+
+
+def revision(
+    metadata, ref_engine, *, out_dir="migrations/versions", message=None, schemas=None, exclude=()
+) -> Path:
+    """Generate the next annotated-SQL migration file from models-vs-ref drift.
+
+    The reference DB must sit at the chain head (caller-provided — sqlpush
+    stays docker-free). Empty drift refuses loudly: no empty files.
+    """
+    p = plan(metadata, ref_engine, schemas=schemas, exclude=exclude)
+    if not p.operations:
+        raise SqlpushError("no drift between models and reference DB — nothing to revise")
+    risk = max((op.risk for op in p.operations), key=lambda r: RISK_RANK[r])
+    ops = [(f"[{op.risk.name}] {op.type} {op.table or '?'}", op.sql) for op in p.operations]
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rev_id = next_revision_id(out)
+    slug = (message or "migration").lower().replace(" ", "_")[:40]
+    path = out / f"{rev_id}_{slug}.sql"
+    prev_n = int(rev_id) - 1
+    path.write_text(
+        render_migration_file(
+            ops=ops,
+            revision_id=rev_id,
+            risk=risk,
+            message=message,
+            parent=f"{prev_n:04d}" if prev_n >= 1 else None,
+        )
+    )
+    return path
 
 
 def _sync_engine_from(target):

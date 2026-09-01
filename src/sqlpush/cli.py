@@ -2,7 +2,8 @@
 """sqlpush: diff/push/check PostgreSQL schema drift from SQLAlchemy models.
 
 Exit codes: diff always 0; check 0 clean / 2 drift / 3 destructive drift;
-push 0 applied / 1 destructive blocked / 2 error (incl. partial failure).
+push 0 applied / 1 destructive blocked / 2 error (incl. partial failure);
+revision 0 written / 1 error (empty drift refuses).
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import importlib
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -33,6 +35,9 @@ app = typer.Typer(add_completion=False, help=__doc__ or "")
 # default, no mutable default) while staying the idiomatic typer style.
 SchemaOpt = Annotated[list[str] | None, typer.Option("--schema")]
 ExcludeOpt = Annotated[list[str] | None, typer.Option("--exclude")]
+# Path-typed options need the Annotated form: B008 (call in default) only
+# exempts typer.Option for non-Path annotations
+DirOpt = Annotated[Path, typer.Option("--dir")]
 
 
 def _load_metadata(spec: str):
@@ -207,6 +212,36 @@ def push(
         )
     if report.partial_failure:
         raise typer.Exit(code=2)
+    raise typer.Exit(code=0)
+
+
+@app.command()
+def revision(
+    metadata_spec: str = typer.Argument(..., help="module:metadata"),
+    ref_dsn: str = typer.Option(..., "--ref-dsn"),
+    message: str | None = typer.Option(None, "--message", "-m"),
+    out_dir: DirOpt = Path("migrations/versions"),
+    schema: SchemaOpt = None,
+    exclude: ExcludeOpt = None,
+):
+    """Generate the next migration file from models vs the reference DB."""
+    md = _load_metadata(metadata_spec)
+    # required --ref-dsn (no DATABASE_URL fallback): the reference DB is a
+    # different database from the push target — conflating them silently
+    # would chain against the wrong head
+    engine = _engine(ref_dsn)
+    try:
+        path = api.revision(
+            md,
+            engine,
+            out_dir=out_dir,
+            message=message,
+            schemas=schema,
+            exclude=exclude or (),
+        )
+    finally:
+        engine.dispose()
+    typer.echo(str(path))
     raise typer.Exit(code=0)
 
 
