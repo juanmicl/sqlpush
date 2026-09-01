@@ -77,9 +77,13 @@ def md_ht():
 
 @pytest.fixture()
 def md_indexed():
-    # F1/F2 (push fire-test): declared Index on a new table — before the
-    # dual-render dedup, push died with DuplicateTable because the index
-    # statement executed twice (embedded in add_table + standalone op).
+    # Plain declared Index on a new table — on alembic 1.19.1
+    # CreateTableOp.from_table captures columns+constraints only, so the
+    # index renders standalone-only (no embedded copy, dedup no-op).
+    # Together with test_push_declared_index_applies_once this pins
+    # push-level idempotence of the standalone path; the
+    # embedded-duplicate mechanism (instrumentation-appended indexes,
+    # the actual fire-test F1/F2 trigger) is pinned in test_diff.py.
     m = MetaData()
     Table(
         "api_indexed",
@@ -106,6 +110,11 @@ def md_indexed():
 
 
 def test_push_declared_index_applies_once(pg_engine, md_indexed):
+    # Plain-declared standalone-only path: one standalone add_index op,
+    # applied exactly once (must not raise DuplicateTable), leaving the
+    # schema clean. NOT the embedded-duplicate mechanism — the dedup is
+    # a no-op for this metadata; that mechanism lives in
+    # test_diff.py's instrumentation tests.
     rep = push(md_indexed, pg_engine)  # must not raise DuplicateTable
     assert rep.applied
     with pg_engine.connect() as conn:

@@ -9,14 +9,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - `push` no longer fails with `DuplicateTable` on tables whose indexes
-  are registered in the metadata (e.g. geoalchemy2's implicit spatial
-  index, or any declared `Index(...)`): alembic's offline CreateTable
-  render embeds every `table.indexes` entry as a trailing statement and
-  autogen ALSO emits standalone `CreateIndexOp`s for the same indexes —
-  the identical statement executed twice. The plan now drops a standalone
-  `add_index` op whose statement is already embedded in the `add_table`
-  render of the same table (found by the atlas dogfooding push
-  fire-test, cycle 4 findings F1/F2).
+  are attached by construction-time instrumentation (e.g. geoalchemy2's
+  implicit spatial index, appended by a listener when the `Table` is
+  built): `CreateTableOp.from_table` captures columns+constraints only,
+  so a plain declared `Index(...)` renders standalone-only and is
+  unaffected — but when instrumentation re-attaches the index during
+  the op's table reconstruction, the offline CreateTable render embeds
+  it as a trailing statement and autogen ALSO emits a standalone
+  `CreateIndexOp` for it: the identical statement executed twice. The
+  plan now drops a standalone `add_index` op whose statement is already
+  embedded in the `add_table` render of the same table (found by the
+  atlas dogfooding push fire-test, cycle 4 findings F1/F2).
 - `@hypertable` tables living in a non-default schema now get a
   schema-qualified `create_hypertable('schema.table', ...)` relation.
   Unqualified, the relation resolved via the session search_path to

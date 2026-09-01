@@ -8,9 +8,13 @@ DESTRUCTIVE = frozenset({"drop_column", "drop_table", "drop_index", "drop_constr
 
 
 def classify(op_type: str) -> RiskClass:
-    """Standalone add_index targets an EXISTING table
-    (indexes of new tables ride along with add_table), so it is risky:
-    a plain CREATE INDEX takes a SHARE lock that blocks writes."""
+    """add_index renders standalone: on alembic 1.19.1 even plain
+    declared indexes of NEW tables arrive standalone
+    (CreateTableOp.from_table captures columns+constraints, not
+    indexes; only instrumentation-embedded ones ride inside the
+    add_table render, and the diff dedups those away). What survives
+    runs CREATE INDEX alone — a SHARE lock that blocks writes, hence
+    risky."""
     if op_type in DESTRUCTIVE:
         return RiskClass.DESTRUCTIVE
     if op_type in SAFE:

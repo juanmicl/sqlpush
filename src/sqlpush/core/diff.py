@@ -277,19 +277,29 @@ def _flatten(ops):
 def _dedup_embedded_indexes(ops: list[PlannedOperation]) -> list[PlannedOperation]:
     """Drop standalone ``add_index`` ops already embedded in an ``add_table`` render.
 
-    Alembic's offline CreateTable render appends every ``table.indexes``
-    entry as a trailing statement, and autogen ALSO emits standalone
-    CreateIndexOps for the same indexes — executing both is a guaranteed
-    duplicate-object failure (push fire-test F1/F2: any metadata-registered
-    Index, e.g. geoalchemy2's implicit spatial index, renders byte-identical
-    in both ops and the second execution collides with 42P07). Suppression
-    side: the standalone op is the redundant one — its statement already
-    runs inside the add_table op, whose render embeds it verbatim; the
-    embedded copy has no other carrier op. Exact-statement containment is
-    safe: both renders come from the same renderer over the same Index
-    objects, so an embedded index matches its standalone op byte-for-byte
-    while a different index's statement cannot be a substring of the
-    create-table render (statement text runs to its own terminator).
+    On alembic 1.19.1 ``CreateTableOp.from_table`` captures columns and
+    constraints only, NOT indexes: a plain declared ``Index(...)`` on a
+    new table never reaches the create render — it arrives
+    standalone-only and is untouched here. The embedding this dedup
+    targets happens when the table carries instrumentation-appended
+    indexes (geoalchemy2-style listeners attaching at Table
+    construction): ``to_table()`` reconstruction re-fires the
+    attachment, the rebuilt table carries the index again, the offline
+    create render embeds it, and autogen ALSO emits the standalone
+    CreateIndexOp — executing both is a guaranteed duplicate-object
+    failure (push fire-test F1/F2: the renders are byte-identical and
+    the second execution collides with 42P07). Suppression side: the
+    standalone op is the redundant one — its statement already runs
+    inside the add_table op, whose render embeds it verbatim; the
+    embedded copy has no other carrier op. Exact-statement containment
+    is safe: both renders come from the same renderer over the same
+    Index objects, so an embedded index matches its standalone op
+    byte-for-byte while a different index's statement cannot be a
+    substring of the create-table render (statement text runs to its
+    own terminator). Known limitation: the keys are bare table names,
+    so two NEW tables sharing a bare name across schemas under-dedup
+    (last-wins in the dict) — containment is SQL-qualified either way,
+    so no wrong suppression is possible.
     """
     table_renders = {op.table: op.sql for op in ops if op.type == "add_table"}
     return [
