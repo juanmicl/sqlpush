@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import Column, Integer, MetaData, Table, text
 
-from sqlpush.api import migrate
+from sqlpush.api import check, migrate
 from sqlpush.chain.format import MigrationFileError
 
 pytestmark = pytest.mark.pg
@@ -111,3 +111,13 @@ def test_migrate_accepts_dsn_string(migrate_db, tmp_path):
     dsn = migrate_db.url.render_as_string(hide_password=False)
     rep = migrate(dsn, chain_dir=tmp_path)
     assert rep.applied == ("0001_init.sql",)
+
+
+def test_versions_table_pruned_from_public_check(migrate_db, tmp_path):
+    """C1: the chain's own bookkeeping must not appear as drift (alembic_version class)."""
+    _write(tmp_path, "0001_init.sql", SAFE_0001)
+    migrate(migrate_db, chain_dir=tmp_path)
+    md = MetaData()
+    Table("mt1", md, Column("id", Integer, primary_key=True))  # exactly the migrated state
+    result = check(md, migrate_db)  # PUBLIC scope — no schemas=
+    assert result.clean, f"sqlpush_versions leaked into the diff: {result.drift}"
