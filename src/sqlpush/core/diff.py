@@ -274,6 +274,35 @@ def _flatten(ops):
             yield op
 
 
+def _dedup_embedded_indexes(ops: list[PlannedOperation]) -> list[PlannedOperation]:
+    """Drop standalone ``add_index`` ops already embedded in an ``add_table`` render.
+
+    Alembic's offline CreateTable render appends every ``table.indexes``
+    entry as a trailing statement, and autogen ALSO emits standalone
+    CreateIndexOps for the same indexes — executing both is a guaranteed
+    duplicate-object failure (push fire-test F1/F2: any metadata-registered
+    Index, e.g. geoalchemy2's implicit spatial index, renders byte-identical
+    in both ops and the second execution collides with 42P07). Suppression
+    side: the standalone op is the redundant one — its statement already
+    runs inside the add_table op, whose render embeds it verbatim; the
+    embedded copy has no other carrier op. Exact-statement containment is
+    safe: both renders come from the same renderer over the same Index
+    objects, so an embedded index matches its standalone op byte-for-byte
+    while a different index's statement cannot be a substring of the
+    create-table render (statement text runs to its own terminator).
+    """
+    table_renders = {op.table: op.sql for op in ops if op.type == "add_table"}
+    return [
+        op
+        for op in ops
+        if not (
+            op.type == "add_index"
+            and op.table in table_renders
+            and op.sql.strip() in table_renders[op.table]
+        )
+    ]
+
+
 def _render_op_sql(op, engine: Engine) -> str:
     buf = io.StringIO()
     offline = MigrationContext.configure(
@@ -336,6 +365,7 @@ class DiffEngine:
         ops: list[PlannedOperation] = []
         for op in _flatten(script.upgrade_ops.ops):
             ops.extend(self._translate(op, engine, exclude))
+        ops = _dedup_embedded_indexes(ops)
         return Plan(operations=tuple(ops))
 
     def _translate(self, op, engine: Engine, exclude: tuple[str, ...]) -> list[PlannedOperation]:

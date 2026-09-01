@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import (
     Column,
     DateTime,
+    Index,
     Integer,
     MetaData,
     String,
@@ -72,6 +73,47 @@ def md_ht():
     with eng.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS api_metrics"))
     eng.dispose()
+
+
+@pytest.fixture()
+def md_indexed():
+    # F1/F2 (push fire-test): declared Index on a new table — before the
+    # dual-render dedup, push died with DuplicateTable because the index
+    # statement executed twice (embedded in add_table + standalone op).
+    m = MetaData()
+    Table(
+        "api_indexed",
+        m,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+        Index("ix_api_indexed_email", "email"),
+    )
+    yield m
+    import os
+
+    import sqlalchemy as sa
+    from sqlalchemy import create_engine
+
+    eng = create_engine(
+        os.environ.get(
+            "SQLPUSH_TEST_DSN", "postgresql+psycopg://sqlpush:sqlpush@localhost:5433/sqlpush_test"
+        ),
+        poolclass=sa.pool.NullPool,
+    )
+    with eng.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS api_indexed"))
+    eng.dispose()
+
+
+def test_push_declared_index_applies_once(pg_engine, md_indexed):
+    rep = push(md_indexed, pg_engine)  # must not raise DuplicateTable
+    assert rep.applied
+    with pg_engine.connect() as conn:
+        n = conn.execute(
+            text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_api_indexed_email'")
+        ).scalar()
+    assert n == 1
+    assert check(md_indexed, pg_engine).clean
 
 
 def test_plan_push_check_roundtrip(pg_engine, md):

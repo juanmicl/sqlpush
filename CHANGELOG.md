@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `push` no longer fails with `DuplicateTable` on tables whose indexes
+  are registered in the metadata (e.g. geoalchemy2's implicit spatial
+  index, or any declared `Index(...)`): alembic's offline CreateTable
+  render embeds every `table.indexes` entry as a trailing statement and
+  autogen ALSO emits standalone `CreateIndexOp`s for the same indexes —
+  the identical statement executed twice. The plan now drops a standalone
+  `add_index` op whose statement is already embedded in the `add_table`
+  render of the same table (found by the atlas dogfooding push
+  fire-test, cycle 4 findings F1/F2).
+
 ## [0.2.0] - 2026-09-01
 
 ### Added

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, text
+from sqlalchemy import Column, DateTime, Index, Integer, MetaData, String, Table, text
 
 from sqlpush.core.diff import DiffEngine
 from sqlpush.types import RiskClass
@@ -414,3 +414,56 @@ def test_same_schema_auto_index_suffix_leak_is_known_limitation(pg_engine):
         with pg_engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS a"))
             conn.execute(text("DROP TABLE IF EXISTS a_b"))
+
+
+def test_declared_index_renders_once(clean_db):
+    # F1/F2 (push fire-test, atlas dogfooding cycle 4): a metadata-registered
+    # Index renders BOTH inside the CreateTableOp's offline render (alembic
+    # appends every table.indexes entry as a trailing statement) AND as a
+    # standalone CreateIndexOp — byte-identical statements, so executing
+    # both was a guaranteed duplicate-object failure. The plan must carry
+    # the index exactly once. Plain SQLAlchemy Table + declared Index: the
+    # mechanism is compiler-level, no geoalchemy2 needed to reproduce.
+    md = MetaData()
+    Table(
+        "indexed",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+        Index("ix_indexed_email", "email"),
+    )
+    plan = DiffEngine().plan(md, clean_db)
+    occurrences = sum("CREATE INDEX ix_indexed_email" in op.sql for op in plan.operations)
+    # once embedded in the add_table render; the standalone add_index op
+    # is deduped away
+    assert occurrences == 1
+
+
+def test_existing_table_index_not_deduped(clean_db):
+    # The dedup must ONLY suppress add_index ops whose statement is already
+    # embedded in an add_table render (same table). An index added to an
+    # EXISTING table (the add_column-style path) has no add_table op to
+    # nest inside — its standalone op must survive.
+    md = MetaData()
+    Table(
+        "indexed2",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+    )
+    md.create_all(clean_db)
+    try:
+        md2 = MetaData()
+        Table(
+            "indexed2",
+            md2,
+            Column("id", Integer, primary_key=True),
+            Column("email", String(50)),
+            Index("ix_indexed2_email", "email"),
+        )
+        plan = DiffEngine().plan(md2, clean_db)
+        standalone = [op for op in plan.operations if op.type == "add_index"]
+        assert [op.table for op in standalone] == ["indexed2"]
+    finally:
+        with clean_db.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS indexed2"))
