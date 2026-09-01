@@ -17,6 +17,14 @@ the project follows [Semantic Versioning](https://semver.org/).
   `add_index` op whose statement is already embedded in the `add_table`
   render of the same table (found by the atlas dogfooding push
   fire-test, cycle 4 findings F1/F2).
+- `@hypertable` tables living in a non-default schema now get a
+  schema-qualified `create_hypertable('schema.table', ...)` relation.
+  Unqualified, the relation resolved via the session search_path to
+  `public.<name>` and the op died with `UndefinedTable` before the
+  hypertable could register. The state-aware registration probe is
+  schema-qualified too (`hypertable_schema` + `hypertable_name`), so a
+  same-named hypertable in another schema no longer suppresses the op
+  (atlas dogfooding push fire-test, cycle 4 finding F3a).
 
 ## [0.2.0] - 2026-09-01
 

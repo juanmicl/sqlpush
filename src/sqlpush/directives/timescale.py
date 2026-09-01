@@ -9,15 +9,15 @@ from sqlpush.annotations import HYPERTABLE_KEY
 from sqlpush.types import PlannedOperation, RiskClass
 
 
-def _is_hypertable(conn: Connection, table_name: str) -> bool:
+def _is_hypertable(conn: Connection, schema: str, table_name: str) -> bool:
     try:
         return bool(
             conn.execute(
                 text(
                     "SELECT 1 FROM timescaledb_information.hypertables "
-                    "WHERE hypertable_name = :name"
+                    "WHERE hypertable_schema = :schema AND hypertable_name = :name"
                 ),
-                {"name": table_name},
+                {"schema": schema, "name": table_name},
             ).scalar()
         )
     except ProgrammingError:
@@ -50,12 +50,22 @@ def hypertable_operations(
         table for table in metadata.tables.values() if table.info.get(HYPERTABLE_KEY) is not None
     ]
     if engine is not None and pending:
+        default_schema = engine.dialect.default_schema_name or "public"
         with engine.connect() as conn:
-            pending = [t for t in pending if not _is_hypertable(conn, t.name)]
+            pending = [
+                t for t in pending if not _is_hypertable(conn, t.schema or default_schema, t.name)
+            ]
     ops: list[PlannedOperation] = []
     for table in pending:
         info = table.info[HYPERTABLE_KEY]
-        name = _lit(table.name)
+        # Schema-qualified relation: create_hypertable resolves an
+        # unqualified name via the session search_path, so a table in a
+        # non-default schema MUST carry its schema or the op lands on
+        # public.<name> (UndefinedTable). Schema-less tables keep the
+        # bare name: they live in the default schema, which the
+        # search_path already resolves.
+        relation = table.name if table.schema is None else f"{table.schema}.{table.name}"
+        name = _lit(relation)
         time_column = _lit(info.time_column)
         parts = [f"SELECT create_hypertable('{name}', '{time_column}'"]
         if info.chunk_time_interval:

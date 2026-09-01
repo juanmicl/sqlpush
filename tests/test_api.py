@@ -116,6 +116,79 @@ def test_push_declared_index_applies_once(pg_engine, md_indexed):
     assert check(md_indexed, pg_engine).clean
 
 
+@pytest.fixture()
+def md_ht_schema():
+    # F3a (push fire-test): @hypertable on a NON-default-schema table.
+    # Composite PK (id, ts): timescaledb requires the partitioning column
+    # in any primary key / unique constraint.
+    import os
+
+    import sqlalchemy as sa
+    from sqlalchemy import create_engine
+
+    eng = create_engine(
+        os.environ.get(
+            "SQLPUSH_TEST_DSN", "postgresql+psycopg://sqlpush:sqlpush@localhost:5433/sqlpush_test"
+        ),
+        poolclass=sa.pool.NullPool,
+    )
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS api_other CASCADE"))
+        conn.execute(text("CREATE SCHEMA api_other"))
+    eng.dispose()
+
+    m = MetaData()
+    t = Table(
+        "api_metrics_other",
+        m,
+        Column("id", Integer, primary_key=True),
+        Column("ts", DateTime, primary_key=True),
+        schema="api_other",
+    )
+
+    @hypertable(time_column="ts")
+    class ApiMetricsOther:
+        __table__ = t
+
+    assert ApiMetricsOther.__table__.info["sqlpush_hypertable"]
+    yield m
+
+    eng = create_engine(
+        os.environ.get(
+            "SQLPUSH_TEST_DSN", "postgresql+psycopg://sqlpush:sqlpush@localhost:5433/sqlpush_test"
+        ),
+        poolclass=sa.pool.NullPool,
+    )
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS api_other CASCADE"))
+    eng.dispose()
+
+
+@pytest.mark.timescale
+def test_push_annotated_non_public_schema_registers(pg_engine, md_ht_schema):
+    # F3a regression: create_hypertable must schema-qualify its relation —
+    # unqualified, it resolved via the session search_path to
+    # public.api_metrics_other and died with UndefinedTable before the
+    # hypertable could register in the table's own schema.
+    rep = push(md_ht_schema, pg_engine, schemas=("api_other",))
+    assert any(a.type == "create_hypertable" for a in rep.applied)
+    with pg_engine.connect() as conn:
+        is_ht = conn.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM "
+                "timescaledb_information.hypertables "
+                "WHERE hypertable_schema = 'api_other' "
+                "AND hypertable_name = 'api_metrics_other')"
+            )
+        ).scalar()
+    assert is_ht
+    # state-aware directive: the schema-qualified registration suppresses
+    # the op on re-push, and check() reports clean
+    rep2 = push(md_ht_schema, pg_engine, schemas=("api_other",))
+    assert rep2.applied == ()
+    assert check(md_ht_schema, pg_engine, schemas=("api_other",)).clean
+
+
 def test_plan_push_check_roundtrip(pg_engine, md):
     p = plan(md, pg_engine)
     assert p.drift
