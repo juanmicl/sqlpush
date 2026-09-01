@@ -23,7 +23,7 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     services:
       pg:
-        image: timescale/timescaledb-ha:2.25.2-pg17
+        image: timescale/timescaledb-ha:pg17-ts2.25
         env:
           POSTGRES_USER: sqlpush
           POSTGRES_PASSWORD: sqlpush
@@ -48,7 +48,7 @@ jobs:
         alembic: ["1.18.*", "1.19.*"]
     services:
       pg:
-        image: timescale/timescaledb-ha:2.25.2-pg17
+        image: timescale/timescaledb-ha:pg17-ts2.25
         env:
           POSTGRES_USER: sqlpush
           POSTGRES_PASSWORD: sqlpush
