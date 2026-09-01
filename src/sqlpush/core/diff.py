@@ -274,6 +274,45 @@ def _flatten(ops):
             yield op
 
 
+def _dedup_embedded_indexes(ops: list[PlannedOperation]) -> list[PlannedOperation]:
+    """Drop standalone ``add_index`` ops already embedded in an ``add_table`` render.
+
+    On alembic 1.19.1 ``CreateTableOp.from_table`` captures columns and
+    constraints only, NOT indexes: a plain declared ``Index(...)`` on a
+    new table never reaches the create render — it arrives
+    standalone-only and is untouched here. The embedding this dedup
+    targets happens when the table carries instrumentation-appended
+    indexes (geoalchemy2-style listeners attaching at Table
+    construction): ``to_table()`` reconstruction re-fires the
+    attachment, the rebuilt table carries the index again, the offline
+    create render embeds it, and autogen ALSO emits the standalone
+    CreateIndexOp — executing both is a guaranteed duplicate-object
+    failure (push fire-test F1/F2: the renders are byte-identical and
+    the second execution collides with 42P07). Suppression side: the
+    standalone op is the redundant one — its statement already runs
+    inside the add_table op, whose render embeds it verbatim; the
+    embedded copy has no other carrier op. Exact-statement containment
+    is safe: both renders come from the same renderer over the same
+    Index objects, so an embedded index matches its standalone op
+    byte-for-byte while a different index's statement cannot be a
+    substring of the create-table render (statement text runs to its
+    own terminator). Known limitation: the keys are bare table names,
+    so two NEW tables sharing a bare name across schemas under-dedup
+    (last-wins in the dict) — containment is SQL-qualified either way,
+    so no wrong suppression is possible.
+    """
+    table_renders = {op.table: op.sql for op in ops if op.type == "add_table"}
+    return [
+        op
+        for op in ops
+        if not (
+            op.type == "add_index"
+            and op.table in table_renders
+            and op.sql.strip() in table_renders[op.table]
+        )
+    ]
+
+
 def _render_op_sql(op, engine: Engine) -> str:
     buf = io.StringIO()
     offline = MigrationContext.configure(
@@ -336,6 +375,7 @@ class DiffEngine:
         ops: list[PlannedOperation] = []
         for op in _flatten(script.upgrade_ops.ops):
             ops.extend(self._translate(op, engine, exclude))
+        ops = _dedup_embedded_indexes(ops)
         return Plan(operations=tuple(ops))
 
     def _translate(self, op, engine: Engine, exclude: tuple[str, ...]) -> list[PlannedOperation]:

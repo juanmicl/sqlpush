@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, text
+from sqlalchemy import Column, DateTime, Index, Integer, MetaData, String, Table, event, text
 
 from sqlpush.core.diff import DiffEngine
 from sqlpush.types import RiskClass
@@ -414,3 +414,123 @@ def test_same_schema_auto_index_suffix_leak_is_known_limitation(pg_engine):
         with pg_engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS a"))
             conn.execute(text("DROP TABLE IF EXISTS a_b"))
+
+
+def test_declared_index_renders_once(clean_db):
+    # Plain declared Index on a NEW table: on alembic 1.19.1
+    # CreateTableOp.from_table captures columns+constraints only, so the
+    # index is NOT embedded in the add_table render — it arrives as a
+    # single standalone add_index op and the embedded-index dedup is a
+    # no-op here. This pins the standalone-only path (and would stay
+    # green with the dedup deleted); the actual embedded-duplicate
+    # mechanism is pinned by the instrumentation tests below.
+    md = MetaData()
+    Table(
+        "indexed",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+        Index("ix_indexed_email", "email"),
+    )
+    plan = DiffEngine().plan(md, clean_db)
+    occurrences = sum("CREATE INDEX ix_indexed_email" in op.sql for op in plan.operations)
+    # standalone-only: exactly one render, no embedded copy to dedup
+    assert occurrences == 1
+
+
+def test_existing_table_index_not_deduped(clean_db):
+    # The dedup must ONLY suppress add_index ops whose statement is already
+    # embedded in an add_table render (same table). An index added to an
+    # EXISTING table (the add_column-style path) has no add_table op to
+    # nest inside — its standalone op must survive.
+    md = MetaData()
+    Table(
+        "indexed2",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+    )
+    md.create_all(clean_db)
+    try:
+        md2 = MetaData()
+        Table(
+            "indexed2",
+            md2,
+            Column("id", Integer, primary_key=True),
+            Column("email", String(50)),
+            Index("ix_indexed2_email", "email"),
+        )
+        plan = DiffEngine().plan(md2, clean_db)
+        standalone = [op for op in plan.operations if op.type == "add_index"]
+        assert [op.table for op in standalone] == ["indexed2"]
+    finally:
+        with clean_db.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS indexed2"))
+
+
+def _instrumented_geo_index(target, parent):
+    # mimic geoalchemy2 <0.18 / spatial_index=True: the implicit spatial
+    # index is appended by a listener at Table construction time. The
+    # guard keys on the column name, so unrelated (and reflected)
+    # tables pass through untouched.
+    if "geo_col" in target.c:
+        Index(f"{target.name}_geo_col_idx", target.c.geo_col)
+
+
+def test_instrumented_index_renders_once(clean_db):
+    # The REAL duplication mechanism (fire-test F1/F2): on alembic
+    # 1.19.1 CreateTableOp.from_table captures columns+constraints only,
+    # so a plain declared Index renders standalone-only — but an index
+    # appended by construction-time instrumentation re-attaches when
+    # to_table() rebuilds the table (after_parent_attach fires again),
+    # the offline add_table render embeds it, AND autogen emits the
+    # standalone CreateIndexOp: byte-identical statements, twice. The
+    # plan must carry the statement exactly once (the dedup drops the
+    # standalone copy). Without the dedup this fails with
+    # occurrences == 2 — the declared-index tests above stay green even
+    # with the dedup deleted, so they cannot pin it.
+    event.listen(Table, "after_parent_attach", _instrumented_geo_index)
+    try:
+        md = MetaData()
+        Table(
+            "geotbl",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("geo_col", String(30)),
+        )
+        plan = DiffEngine().plan(md, clean_db)
+    finally:
+        event.remove(Table, "after_parent_attach", _instrumented_geo_index)
+    occurrences = sum("CREATE INDEX geotbl_geo_col_idx" in op.sql for op in plan.operations)
+    assert occurrences == 1
+    # the standalone copy is the suppressed one; the embedded copy rides
+    # inside the add_table render
+    assert not any(op.type == "add_index" and op.table == "geotbl" for op in plan.operations)
+
+
+def test_instrumented_index_renders_once_schema_qual(other_schema):
+    # Same mechanism on a schema'd table: both ops carry the BARE table
+    # name in op.table while their SQL is schema-qualified — this pins
+    # the dedup's cross-schema key match (bare-name key + qualified-SQL
+    # containment must still collapse the pair to one occurrence).
+    event.listen(Table, "after_parent_attach", _instrumented_geo_index)
+    try:
+        md = MetaData()
+        Table(
+            "geotbl",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("geo_col", String(30)),
+            schema="other",
+        )
+        plan = DiffEngine().plan(md, other_schema, schemas=("public", "other"))
+    finally:
+        event.remove(Table, "after_parent_attach", _instrumented_geo_index)
+    occurrences = sum("CREATE INDEX geotbl_geo_col_idx" in op.sql for op in plan.operations)
+    assert occurrences == 1
+    # the qualified add_table render (with the embedded index) survives;
+    # the standalone qualified copy is gone
+    assert any(
+        op.type == "add_table" and "CREATE TABLE other.geotbl" in op.sql for op in plan.operations
+    )
+    assert not any(op.type == "add_index" and op.table == "geotbl" for op in plan.operations)

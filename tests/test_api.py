@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import (
     Column,
     DateTime,
+    Index,
     Integer,
     MetaData,
     String,
@@ -72,6 +73,129 @@ def md_ht():
     with eng.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS api_metrics"))
     eng.dispose()
+
+
+@pytest.fixture()
+def md_indexed():
+    # Plain declared Index on a new table — on alembic 1.19.1
+    # CreateTableOp.from_table captures columns+constraints only, so the
+    # index renders standalone-only (no embedded copy, dedup no-op).
+    # Together with test_push_declared_index_applies_once this pins
+    # push-level idempotence of the standalone path; the
+    # embedded-duplicate mechanism (instrumentation-appended indexes,
+    # the actual fire-test F1/F2 trigger) is pinned in test_diff.py.
+    m = MetaData()
+    Table(
+        "api_indexed",
+        m,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+        Index("ix_api_indexed_email", "email"),
+    )
+    yield m
+    import os
+
+    import sqlalchemy as sa
+    from sqlalchemy import create_engine
+
+    eng = create_engine(
+        os.environ.get(
+            "SQLPUSH_TEST_DSN", "postgresql+psycopg://sqlpush:sqlpush@localhost:5433/sqlpush_test"
+        ),
+        poolclass=sa.pool.NullPool,
+    )
+    with eng.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS api_indexed"))
+    eng.dispose()
+
+
+def test_push_declared_index_applies_once(pg_engine, md_indexed):
+    # Plain-declared standalone-only path: one standalone add_index op,
+    # applied exactly once (must not raise DuplicateTable), leaving the
+    # schema clean. NOT the embedded-duplicate mechanism — the dedup is
+    # a no-op for this metadata; that mechanism lives in
+    # test_diff.py's instrumentation tests.
+    rep = push(md_indexed, pg_engine)  # must not raise DuplicateTable
+    assert rep.applied
+    with pg_engine.connect() as conn:
+        n = conn.execute(
+            text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_api_indexed_email'")
+        ).scalar()
+    assert n == 1
+    assert check(md_indexed, pg_engine).clean
+
+
+@pytest.fixture()
+def md_ht_schema():
+    # F3a (push fire-test): @hypertable on a NON-default-schema table.
+    # Composite PK (id, ts): timescaledb requires the partitioning column
+    # in any primary key / unique constraint.
+    import os
+
+    import sqlalchemy as sa
+    from sqlalchemy import create_engine
+
+    eng = create_engine(
+        os.environ.get(
+            "SQLPUSH_TEST_DSN", "postgresql+psycopg://sqlpush:sqlpush@localhost:5433/sqlpush_test"
+        ),
+        poolclass=sa.pool.NullPool,
+    )
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS api_other CASCADE"))
+        conn.execute(text("CREATE SCHEMA api_other"))
+    eng.dispose()
+
+    m = MetaData()
+    t = Table(
+        "api_metrics_other",
+        m,
+        Column("id", Integer, primary_key=True),
+        Column("ts", DateTime, primary_key=True),
+        schema="api_other",
+    )
+
+    @hypertable(time_column="ts")
+    class ApiMetricsOther:
+        __table__ = t
+
+    assert ApiMetricsOther.__table__.info["sqlpush_hypertable"]
+    yield m
+
+    eng = create_engine(
+        os.environ.get(
+            "SQLPUSH_TEST_DSN", "postgresql+psycopg://sqlpush:sqlpush@localhost:5433/sqlpush_test"
+        ),
+        poolclass=sa.pool.NullPool,
+    )
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS api_other CASCADE"))
+    eng.dispose()
+
+
+@pytest.mark.timescale
+def test_push_annotated_non_public_schema_registers(pg_engine, md_ht_schema):
+    # F3a regression: create_hypertable must schema-qualify its relation —
+    # unqualified, it resolved via the session search_path to
+    # public.api_metrics_other and died with UndefinedTable before the
+    # hypertable could register in the table's own schema.
+    rep = push(md_ht_schema, pg_engine, schemas=("api_other",))
+    assert any(a.type == "create_hypertable" for a in rep.applied)
+    with pg_engine.connect() as conn:
+        is_ht = conn.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM "
+                "timescaledb_information.hypertables "
+                "WHERE hypertable_schema = 'api_other' "
+                "AND hypertable_name = 'api_metrics_other')"
+            )
+        ).scalar()
+    assert is_ht
+    # state-aware directive: the schema-qualified registration suppresses
+    # the op on re-push, and check() reports clean
+    rep2 = push(md_ht_schema, pg_engine, schemas=("api_other",))
+    assert rep2.applied == ()
+    assert check(md_ht_schema, pg_engine, schemas=("api_other",)).clean
 
 
 def test_plan_push_check_roundtrip(pg_engine, md):

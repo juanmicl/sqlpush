@@ -64,3 +64,25 @@ def test_identifier_escaping():
         "chunk_time_interval => INTERVAL '1 day''', migrate_data => true, "
         "if_not_exists => true, create_default_indexes => false);"
     )
+
+
+def test_non_public_schema_relation_qualified():
+    # F3a (push fire-test): create_hypertable resolves an unqualified
+    # relation via the session search_path — a table in a non-default
+    # schema must carry its schema or the op targets public.<name>
+    # (UndefinedTable at apply time).
+    md = MetaData()
+    t = Table(
+        "metrics",
+        md,
+        Column("ts", DateTime),
+        Column("v", Integer),
+        schema="other",
+    )
+    t.info["sqlpush_hypertable"] = type(
+        "H", (), {"time_column": "ts", "chunk_time_interval": "1 day"}
+    )()
+    ops = hypertable_operations(md)
+    assert len(ops) == 1
+    assert "'other.metrics'" in ops[0].sql
+    assert "create_hypertable" in ops[0].sql
