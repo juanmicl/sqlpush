@@ -104,8 +104,11 @@ repeated `--schema` / `--exclude` options.
 | `push` | applied | destructive blocked | error (incl. partial failure) | |
 
 `push --safe-only` runs only safe operations and skips the rest
-informationally (exit `0`). A failed `CREATE INDEX CONCURRENTLY` marks the
-run as partial failure (exit `2`) instead of silently half-applying.
+informationally (exit `0`). Indexes on existing tables build
+`CONCURRENTLY` by default (opt out with `--no-concurrently`); a failed
+`CREATE INDEX CONCURRENTLY` marks the run as partial failure (exit `2`)
+instead of silently half-applying, and leaves an INVALID index — drop it
+(`DROP INDEX CONCURRENTLY`) and re-push.
 
 ## FastAPI / SQLModel: replace `create_all`
 
@@ -140,9 +143,11 @@ flowchart LR
   internals included) before reflection even starts.
 - **Classifier** maps each operation to a risk class; unknown operations
   are `risky`, never silently safe.
-- **Executor** splits the plan: `CONCURRENTLY` statements run one-per-
-  transaction on autocommit, everything else applies in a single atomic
-  transaction with a bounded `lock_timeout`.
+- **Executor** splits the plan: existing-table indexes render
+  `CREATE INDEX CONCURRENTLY` and run one-per-transaction on autocommit
+  (`--no-concurrently` opts out; indexes on tables the same plan creates
+  stay in the atomic transaction), everything else applies in a single
+  atomic transaction with a bounded `lock_timeout`.
 - **Typed errors**: only `SqlpushError` / `ConnectFailed` /
   `MetadataImportError` escape the API, never raw driver exceptions.
 
@@ -172,11 +177,11 @@ deprecated)? There is a [migration guide](docs/migrating-from-migra.md).
 - The advisory-lock key derives from the database OID: two DSN spellings
   of the same database contend for the same lock.
 - `--json` output is a versioned contract (`"version": 1`) meant for
-  tooling; additive changes only within a version.
+  tooling; additive changes only within a version (operations now carry
+  a `concurrent` boolean).
 
 ## Roadmap (0.1.x)
 
-- `CREATE INDEX CONCURRENTLY` by default for indexes on existing tables
 - asyncpg DSN translation in `ensure_schema(AsyncEngine)`
 - jsonschema-validated `--json` output
 

@@ -8,6 +8,40 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `CREATE INDEX` / `CREATE UNIQUE INDEX` on EXISTING tables now render
+  `CONCURRENTLY` by default in `plan` / `push` / `revision` output,
+  including `revision`-generated migration SQL (API: `concurrently=True`
+  on `plan` / `push` / `revision`; CLI opt-out `--no-concurrently` on
+  `push` / `revision`): the plain form takes a SHARE lock that blocks
+  all writes for the whole build, while CONCURRENTLY builds without
+  blocking writers. Indexes on tables created in the same plan stay
+  plain — a brand-new table has no concurrent writers, and the create
+  stays inside the plan's atomic transaction. Concurrently-rendered ops
+  run on push's autocommit segment (a failure there is a recorded
+  partial failure, not a rollback) and are still classified `risky`.
+  The knob threads through the advisory-lock winner path: the lock
+  winner's re-plan renders exactly what the caller requested.
+- `push` can bound each statement's runtime with a `statement_timeout`
+  (API: `push(..., statement_timeout=...)`, seconds, `None` = set
+  nothing; CLI: `push --statement-timeout`): the transactional segment
+  applies it as `SET LOCAL statement_timeout`, the concurrent
+  (autocommit) segment as a session `statement_timeout` that is `RESET`
+  before the connection returns to the pool — a pooled borrower never
+  inherits the budget. It threads through the advisory-lock winner path
+  with `concurrently`, and negative values are rejected up front with
+  a typed `SqlpushError`.
+- The concurrent (autocommit) segment of `push` now runs under a
+  session `lock_timeout` with the same value as the transactional
+  segment's: previously `CREATE INDEX CONCURRENTLY` had no lock budget
+  at all and could queue indefinitely behind another transaction's
+  table lock. The session GUC is `RESET` (and the connection
+  invalidated if the reset fails) so it never leaks to the pool's next
+  borrower.
+- Every operation in the versioned plan JSON (`diff --json`,
+  `check --json`, `Plan.to_json_dict`) now carries a `"concurrent"`
+  boolean — additive to the v1 contract, no existing key or value
+  changed. It reports whether the operation's SQL was rendered with
+  `CREATE INDEX CONCURRENTLY` (see the rendering change above).
 - `migrate` now replays CONCURRENTLY-containing chain files per-op on
   the op-label delimiters: the plain segment runs first in one
   transaction (chain files can create→index within one file), then
@@ -19,11 +53,7 @@ the project follows [Semantic Versioning](https://semver.org/).
   committed plain segment reported honestly in the notes). Concurrent-
   free files keep the exact 0.4.2 whole-text single-transaction replay,
   so existing chains are byte-identically unaffected, and
-  `revision`-generated files (existing-table indexes render
-  CONCURRENTLY since 0.5.0) round-trip through the chain. Known
-  hand-edit cost: a label-less body containing CONCURRENTLY routes to
-  the autocommit lane, and lines starting `--` are stripped from
-  per-op parsing.
+  `revision`-generated files round-trip through the chain.
 - `migrate` gains `--statement-timeout` (API:
   `migrate(..., statement_timeout=...)`, seconds, unset by default):
   applied as `SET LOCAL` in every per-file transaction and as a session
@@ -31,44 +61,24 @@ the project follows [Semantic Versioning](https://semver.org/).
   before it closes). Negative values are rejected up front with a
   typed `SqlpushError` — same contract as `push`.
 
-- CLI: `push` and `revision` gain `--no-concurrently` (opt out of the
-  CONCURRENTLY-by-default index rendering; plain `CREATE INDEX` builds)
-  and `push` gains `--statement-timeout` (seconds, unset by default).
-  Python API: `plan` / `push` / `revision` accept `concurrently=True`
-  and `push` accepts `statement_timeout=None`. Both thread through the
-  advisory-lock winner path: the lock winner's re-plan renders exactly
-  what the caller requested.
-- `push` can bound each statement's runtime with a `statement_timeout`
-  (API: `push(..., statement_timeout=...)`, seconds, `None` = set
-  nothing): the transactional segment applies it as `SET LOCAL
-  statement_timeout`, the concurrent (autocommit) segment as a session
-  `statement_timeout` that is `RESET` before the connection returns to
-  the pool — a pooled borrower never inherits the budget. Negative
-  values are rejected up front with a typed `SqlpushError`.
-- The concurrent (autocommit) segment of `push` now runs under a
-  session `lock_timeout` with the same value as the transactional
-  segment's: previously `CREATE INDEX CONCURRENTLY` had no lock budget
-  at all and could queue indefinitely behind another transaction's
-  table lock. The session GUC is `RESET` (and the connection
-  invalidated if the reset fails) so it never leaks to the pool's next
-  borrower.
-- `CREATE INDEX` / `CREATE UNIQUE INDEX` on EXISTING tables now render
-  `CONCURRENTLY` by default in `plan` / `push` / `revision` output
-  (including `revision`-generated migration SQL): the plain form takes
-  a SHARE lock that blocks all writes for the whole build, while
-  CONCURRENTLY builds without blocking writers. Indexes on tables
-  created in the same plan stay plain — a brand-new table has no
-  concurrent writers, and the create stays inside the plan's atomic
-  transaction. Concurrently-rendered ops run on push's autocommit
-  segment (a failure there is a recorded partial failure, not a
-  rollback) and are still classified `risky`. Opt out per call with
-  `concurrently=False` (Python API on `plan` / `push` / `revision`;
-  CLI `--no-concurrently` on `push` / `revision`).
-- Every operation in the versioned plan JSON (`diff --json`,
-  `check --json`, `Plan.to_json_dict`) now carries a `"concurrent"`
-  boolean — additive to the v1 contract, no existing key or value
-  changed. It reports whether the operation's SQL was rendered with
-  `CREATE INDEX CONCURRENTLY` (see the rendering change above).
+### Known limitations
+
+- Generated chain files replay per-op on their `-- op N [label]`
+  delimiters; hand-edits bypass that tokenization (pinned chain spec
+  §7). A label-less body containing CONCURRENTLY routes whole to the
+  autocommit lane statement-by-statement, and lines starting `--` are
+  stripped from per-op parsing — dollar-quoted bodies containing `--`
+  lines are only safe in the whole-text fast path.
+- A failed or timed-out `CREATE INDEX CONCURRENTLY` leaves an INVALID
+  index behind: recover with `DROP INDEX CONCURRENTLY <name>` and
+  re-push (optionally `--no-concurrently`). `statement_timeout` applies
+  inside index builds, and an aborted build still leaves the INVALID
+  index.
+- Mixed-file crash window: plain segment committed + concurrent segment
+  applied + no versions row → a re-run fails loud on the existing
+  objects rather than silently re-applying.
+- Re-running against an already-existing index fails loud: the rendered
+  `CREATE INDEX CONCURRENTLY` carries no `IF NOT EXISTS`.
 
 ## [0.4.2] - 2026-09-02
 
