@@ -271,7 +271,3 @@ Guides: [the chain](docs/the-chain.md) (file format, gates, backfills),
 ## Roadmap
 
 - jsonschema-validated `--json` output
-
-## License
-
-[MIT](LICENSE) · © 2026 Juan Miguel Contreras
