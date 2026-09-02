@@ -405,7 +405,9 @@ def _dedup_enum_types(ops: list[PlannedOperation]) -> list[PlannedOperation]:
     copy stays embedded in its original add_table render. A metadata
     that defines one type name two DIFFERENT ways keeps both statements
     and still fails loudly at apply time: silent first-win would mask a
-    genuine contradiction.
+    genuine contradiction. Ops whose statements all survive pass
+    through as the ORIGINAL object (identity) — a re-joined copy of
+    unchanged SQL buys nothing.
     """
     seen: set[str] = set()
 
@@ -420,10 +422,12 @@ def _dedup_enum_types(ops: list[PlannedOperation]) -> list[PlannedOperation]:
             continue
         stmts = _split_statements(op.sql)
         kept: list[str] = []
+        dropped = False
         for stmt in stmts:
             norm = " ".join(stmt.split())
             if _is_type_stmt(norm):
                 if norm in seen:
+                    dropped = True
                     continue
                 seen.add(norm)
             if norm:
@@ -432,6 +436,9 @@ def _dedup_enum_types(ops: list[PlannedOperation]) -> list[PlannedOperation]:
             # unreachable for table ops (their CREATE/DROP TABLE always
             # survives); guard anyway — an empty op.sql is worse than
             # the duplicate it replaced
+            continue
+        if not dropped:
+            out.append(op)
             continue
         out.append(
             PlannedOperation(
