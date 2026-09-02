@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-02
+
 ### Added
 
 - `@hypertable` is now dual-mechanism: besides recording the annotation on
@@ -18,6 +20,26 @@ the project follows [Semantic Versioning](https://semver.org/).
 - `create_hypertable` rendering is now a single shared helper
   (`sqlpush.annotations.create_hypertable_sql`) consumed by both the
   directive and the listener — the two mechanisms cannot drift apart.
+
+### Fixed
+
+- Shared native enums no longer render duplicate `CREATE TYPE` across table
+  ops: SQLAlchemy's offline per-table render embeds the enum DDL in EVERY
+  table op that references it (per-invoke create/drop memos), so two tables
+  sharing one Python enum produced an unreplayable plan — the second
+  `CREATE TYPE` died with `DuplicateObject` on BOTH the push path and
+  `migrate` replay of a generated chain. The plan now emits each
+  verbatim `CREATE/DROP TYPE` statement exactly once (first occurrence
+  stays embedded in its original op); non-verbatim duplicates still fail
+  loudly at apply — no silent first-win.
+- TimescaleDB's born-DESC default time index (`<table>_<dimension>_idx`)
+  now compares EQUAL to a metadata-declared index with the same qualified
+  name, owning hypertable and column sequence: the sort-order difference is
+  extension-birth state, not drift. Previously a declared time index over
+  a `create_hypertable`-defaulted table reported a `drop_index` +
+  `add_index` PAIR on every `check()`/`plan()` (both-present sibling of the
+  DB-only auto-index prune). Genuinely different declarations (reordered or
+  extra columns) still report the pair.
 
 ## [0.4.0] - 2026-09-02
 
