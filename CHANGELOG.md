@@ -6,6 +6,22 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Documentation: a chain guide (`docs/the-chain.md`: the three verbs,
+  file format, migrate's gates, CONCURRENTLY replay semantics, the
+  data-backfill workflow, the hand-authored `0000_extensions.sql`
+  pattern, and an honest-limitations list) and an alembic migration
+  guide (`docs/migrating-from-alembic.md`: parity check first, the
+  empty-chain baseline, dual-run switchover, and a scratch-DB
+  equivalence proof; no automated revision conversion, stated up
+  front). The README now documents all six verbs: the full exit-code
+  table, a per-verb flags reference, the inherited-database story, and
+  schema-scoping facts. The front page leads with the `create_all`
+  retirement story (the tutorial lifespan against the one-line
+  `aensure_schema(..., mode="check")` boot guard), and the PyPI
+  keywords now include `fastapi` and `sqlmodel`.
+
 ## [0.5.0] - 2026-09-02
 
 ### Added
@@ -66,8 +82,10 @@ the project follows [Semantic Versioning](https://semver.org/).
 ### Known limitations
 
 - Generated chain files replay per-op on their `-- op N [label]`
-  delimiters; hand-edits bypass that tokenization (pinned chain spec
-  §7). A label-less body containing CONCURRENTLY routes whole to the
+  delimiters; hand-edits bypass that tokenization (a deliberate
+  trade-off: generated files carry the op labels the replay splits on;
+  hand-edits cannot rely on them). A label-less body containing
+  CONCURRENTLY routes whole to the
   autocommit lane statement-by-statement, and lines starting `--` are
   stripped from per-op parsing — dollar-quoted bodies containing `--`
   lines are only safe in the whole-text fast path.
