@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-02
+
 ### Fixed
 
 - `migrate` no longer blocks forever on the advisory lock: the chain
