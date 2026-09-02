@@ -8,6 +8,20 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `push` can bound each statement's runtime with a `statement_timeout`
+  (API: `push(..., statement_timeout=...)`, seconds, `None` = set
+  nothing): the transactional segment applies it as `SET LOCAL
+  statement_timeout`, the concurrent (autocommit) segment as a session
+  `statement_timeout` that is `RESET` before the connection returns to
+  the pool — a pooled borrower never inherits the budget. Negative
+  values are rejected up front with a typed `SqlpushError`.
+- The concurrent (autocommit) segment of `push` now runs under a
+  session `lock_timeout` with the same value as the transactional
+  segment's: previously `CREATE INDEX CONCURRENTLY` had no lock budget
+  at all and could queue indefinitely behind another transaction's
+  table lock. The session GUC is `RESET` (and the connection
+  invalidated if the reset fails) so it never leaks to the pool's next
+  borrower.
 - `CREATE INDEX` / `CREATE UNIQUE INDEX` on EXISTING tables now render
   `CONCURRENTLY` by default in `plan` / `push` / `revision` output
   (including `revision`-generated migration SQL): the plain form takes

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from sqlalchemy import text
@@ -32,6 +33,33 @@ def _is_concurrent(op: PlannedOperation) -> bool:
     return op.concurrent or "CONCURRENTLY" in op.sql.upper()
 
 
+@contextlib.contextmanager
+def _session_gucs(conn, **gucs: str | int) -> Iterator[None]:
+    """Session-level ``SET``/``RESET`` with pooled-connection hygiene.
+
+    The autocommit (CONCURRENTLY) segment cannot use ``SET LOCAL`` —
+    there is no surrounding transaction — so its GUCs are session-level,
+    and a session ``SET`` survives segment end (0.4.2 lesson). RESET runs
+    per GUC in ``finally``; a reset failure is suppressed (it must never
+    mask the segment's own outcome) and the connection is invalidated so
+    the pool discards it instead of handing the next borrower a session
+    still carrying the shrunken budget.
+    """
+    try:
+        for name, value in gucs.items():
+            # names come from sqlpush code, values are ints inlined in
+            # the same style as the txn segment's SET LOCAL (PostgreSQL
+            # does not accept bind parameters for SET)
+            conn.execute(text(f"SET {name} = '{value}'"))
+        yield
+    finally:
+        for name in gucs:
+            try:
+                conn.execute(text(f"RESET {name}"))
+            except Exception:  # noqa: BLE001  # never mask the segment's outcome
+                conn.invalidate()
+
+
 def apply_plan(
     engine: Engine,
     plan: Plan,
@@ -39,8 +67,11 @@ def apply_plan(
     allow_destructive: bool = False,
     safe_only: bool = False,
     lock_timeout: float = 5.0,
+    statement_timeout: float | None = None,
 ) -> Report:
     start = time.monotonic()
+    if statement_timeout is not None and statement_timeout < 0:
+        raise SqlpushError(f"statement_timeout must be >= 0, got {statement_timeout}")
 
     blocked = tuple(op for op in plan.operations if op.risk is RiskClass.DESTRUCTIVE)
     if blocked and not allow_destructive:
@@ -72,13 +103,21 @@ def apply_plan(
     concurrent = [op for op in runnable if _is_concurrent(op)]
     if concurrent:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-            for op in concurrent:
-                try:
-                    conn.execute(text(op.sql))
-                    applied.append(AppliedOperation(op.type, "applied"))
-                except Exception:  # noqa: BLE001  # concurrent ops record any DB failure and continue
-                    applied.append(AppliedOperation(op.type, "failed"))
-                    partial_failure = True
+            # A7: the concurrent segment gets the SAME lock budget as the
+            # txn segment (session-level: autocommit has no surrounding
+            # transaction for SET LOCAL), plus the optional statement
+            # budget; both RESET before the connection returns to the pool
+            session_gucs: dict[str, int] = {"lock_timeout": int(lock_timeout * 1000)}
+            if statement_timeout is not None:
+                session_gucs["statement_timeout"] = int(statement_timeout * 1000)
+            with _session_gucs(conn, **session_gucs):
+                for op in concurrent:
+                    try:
+                        conn.execute(text(op.sql))
+                        applied.append(AppliedOperation(op.type, "applied"))
+                    except Exception:  # noqa: BLE001  # concurrent ops record any DB failure and continue
+                        applied.append(AppliedOperation(op.type, "failed"))
+                        partial_failure = True
 
     # --- transactional segment: atomic ----------------------------------
     plain = [op for op in runnable if not _is_concurrent(op)]
@@ -86,9 +125,13 @@ def apply_plan(
         try:
             with engine.begin() as conn:
                 # NOTE: PostgreSQL does not accept bind parameters for SET
-                # (utility statement), so the int is inlined; lock_timeout is
-                # a typed float parameter, not user input.
+                # (utility statement), so the int is inlined; both timeouts
+                # are typed float parameters, not user input.
                 conn.execute(text(f"SET LOCAL lock_timeout = {int(lock_timeout * 1000)}"))
+                if statement_timeout is not None:
+                    conn.execute(
+                        text(f"SET LOCAL statement_timeout = {int(statement_timeout * 1000)}")
+                    )
                 for op in plain:
                     conn.execute(text(op.sql))
             applied.extend(AppliedOperation(op.type, "applied") for op in plain)

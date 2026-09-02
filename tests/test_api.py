@@ -16,6 +16,8 @@ from sqlalchemy import (
 import sqlpush
 from sqlpush import check, ensure_schema, plan, push
 from sqlpush.annotations import hypertable
+from sqlpush.apply.executor import apply_plan
+from sqlpush.types import Plan, PlannedOperation, RiskClass
 
 pytestmark = pytest.mark.pg
 
@@ -123,6 +125,87 @@ def test_push_declared_index_applies_once(pg_engine, md_indexed):
         ).scalar()
     assert n == 1
     assert check(md_indexed, pg_engine).clean
+
+
+@pytest.fixture()
+def md_conc_push(pg_engine):
+    # §5.1: an EXISTING table gaining a declared index — the shape the
+    # CONCURRENTLY-by-default rendering targets
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS conc_push"))
+        conn.execute(text("CREATE TABLE conc_push (id INTEGER PRIMARY KEY, email VARCHAR(50))"))
+    md = MetaData()
+    Table(
+        "conc_push",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+        Index("ix_conc_push_email", "email"),
+    )
+    yield md
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS conc_push"))
+
+
+def test_push_existing_table_index_concurrent_end_to_end(pg_engine, md_conc_push):
+    # Live push through the DEFAULT locked path: the index op is planned
+    # CONCURRENTLY (flag + SQL), applied on the autocommit segment, lands
+    # VALID in pg_indexes, and the push is honest about outcomes — a
+    # failing concurrent op is a partial failure while the transactional
+    # segment still applies (mirror of test_executor.py's split test,
+    # with the injected-plan shape: flag AND SQL both set).
+    rep = push(md_conc_push, pg_engine)
+    idx_applied = [a for a in rep.applied if a.type == "add_index"]
+    assert idx_applied and all(a.status == "applied" for a in idx_applied)
+    with pg_engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT x.indisvalid FROM pg_indexes i "
+                "JOIN pg_class c ON c.relname = i.indexname "
+                "JOIN pg_index x ON x.indexrelid = c.oid "
+                "WHERE i.schemaname = 'public' AND i.indexname = 'ix_conc_push_email'"
+            )
+        ).first()
+    assert row is not None and row[0] is True  # exists AND not INVALID
+    assert check(md_conc_push, pg_engine).clean
+
+    plan = Plan(
+        operations=(
+            PlannedOperation(
+                type="add_index",
+                risk=RiskClass.RISKY,
+                sql="CREATE INDEX CONCURRENTLY ix_cok ON conc_push (id)",
+                table="conc_push",
+                concurrent=True,
+            ),
+            PlannedOperation(
+                type="add_index",
+                risk=RiskClass.RISKY,
+                sql="CREATE INDEX CONCURRENTLY ix_cbad ON conc_push (nope)",
+                table="conc_push",
+                concurrent=True,
+            ),
+            PlannedOperation(
+                type="add_column",
+                risk=RiskClass.SAFE,
+                sql="ALTER TABLE conc_push ADD COLUMN a2 INT",
+                table="conc_push",
+                column="a2",
+            ),
+        )
+    )
+    report = apply_plan(pg_engine, plan)
+    assert report.partial_failure is True
+    statuses = {a.type + a.status for a in report.applied}
+    assert any("failed" in s for s in statuses)
+    with pg_engine.connect() as conn:
+        has_col = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'conc_push' AND column_name = 'a2'"
+            )
+        ).first()
+    assert has_col is not None  # txn segment still ran
 
 
 @pytest.fixture()
