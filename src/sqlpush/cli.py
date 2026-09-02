@@ -250,12 +250,18 @@ def revision(
 def migrate(
     dsn: str | None = typer.Option(None),
     allow_destructive: bool = typer.Option(False, "--allow-destructive"),
+    advisory_wait: float = typer.Option(30.0, "--advisory-wait"),
     out_dir: DirOpt = Path("migrations/versions"),
 ):
     """Replay pending migration files (gates + checksum bookkeeping)."""
     engine = _engine(dsn)
     try:
-        report = api.migrate(engine, chain_dir=out_dir, allow_destructive=allow_destructive)
+        report = api.migrate(
+            engine,
+            chain_dir=out_dir,
+            allow_destructive=allow_destructive,
+            advisory_wait=advisory_wait,
+        )
     finally:
         engine.dispose()
     typer.echo(

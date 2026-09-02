@@ -76,6 +76,15 @@ def test_with_advisory_lock_rejects_negative_budgets(kwargs):
         )
 
 
+# --- B3 (0.4.2): migrate advisory-wait validation (validation runs
+# before any connection attempt, so DB-free like I4) ------------------------
+
+
+def test_migrate_rejects_negative_advisory_wait(tmp_path):
+    with pytest.raises(SqlpushError, match=">= 0"):
+        api.migrate(_lazy_engine(), chain_dir=tmp_path, advisory_wait=-1)
+
+
 # --- I6: AlterColumnOp disambiguation (sentinel semantics per
 # docs/notes/alembic-notes.md Pattern C: False/None = do not touch) ---------
 

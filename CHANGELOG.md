@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `migrate` no longer blocks forever on the advisory lock: the chain
+  session's wait is now bounded — `pg_try_advisory_lock` polled every
+  0.5s against a monotonic deadline (default 30s), mirroring `push` —
+  and `migrate` exposes `--advisory-wait` (API: `advisory_wait=`) to
+  tune or zero it. An exhausted budget raises a typed
+  `SqlpushError` instead of hanging on a stuck holder. `stamp` shares
+  the chain session and gets the same bounded default.
+
 ## [0.4.1] - 2026-09-02
 
 ### Added

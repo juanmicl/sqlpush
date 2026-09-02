@@ -163,16 +163,29 @@ def revision(
     return path
 
 
-def migrate(target, *, chain_dir="migrations/versions", allow_destructive=False) -> MigrateReport:
+def migrate(
+    target,
+    *,
+    chain_dir="migrations/versions",
+    allow_destructive=False,
+    advisory_wait=30.0,
+) -> MigrateReport:
     """Replay annotated-SQL chain files with gates + same-txn bookkeeping.
 
     ``target`` is a DSN string, sync ``Engine`` or ``AsyncEngine`` (resolved
-    via ``_sync_engine_from``; engines created here are disposed). See
+    via ``_sync_engine_from``; engines created here are disposed).
+    ``advisory_wait`` bounds the advisory-lock wait (seconds; 0 = fail
+    immediately if held — same contract as ``push``). See
     ``chain.migrate.run_migrate`` for the execution contract.
     """
     engine, dispose = _sync_engine_from(target)
     try:
-        return run_migrate(engine, chain_dir=chain_dir, allow_destructive=allow_destructive)
+        return run_migrate(
+            engine,
+            chain_dir=chain_dir,
+            allow_destructive=allow_destructive,
+            advisory_wait=advisory_wait,
+        )
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched
         _raise_typed(exc)
