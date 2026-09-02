@@ -15,6 +15,13 @@ the project follows [Semantic Versioning](https://semver.org/).
   tune or zero it. An exhausted budget raises a typed
   `SqlpushError` instead of hanging on a stuck holder. `stamp` shares
   the chain session and gets the same bounded default.
+- `stamp` no longer silently refreshes the checksum of a file that was
+  edited after it was applied/stamped: the recorded checksum is read
+  first, and a registered-but-different checksum now refuses with a
+  typed error (first mismatch stops the walk — nothing after it
+  registers) instead of overwriting the registry. `--force` (API:
+  `force=True`) accepts the new content, so the chain's edit-detection
+  integrity survives re-stamping.
 
 ## [0.4.1] - 2026-09-02
 

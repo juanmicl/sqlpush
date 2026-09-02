@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from sqlpush.api import migrate, stamp
 from sqlpush.chain.format import checksum
+from sqlpush.types import SqlpushError
 
 # helpers inlined: `from tests.test_migrate import ...` doesn't resolve —
 # tests/ is not a package and repo root is not on sys.path under pytest
@@ -70,3 +71,49 @@ def test_stamp_fail_loud_on_bad_header(stamp_db, tmp_path):
     assert rep.blocked == ("0001_bad.sql",)
     assert rep.skipped == ()  # orden estricto: nada posterior se registra
     assert any(n.startswith("0001_bad.sql: ") for n in rep.notes)
+
+
+def test_stamp_refuses_edited_file_without_force(stamp_db, tmp_path):
+    # B4: re-stamping after editing an applied/stamped file must NOT
+    # silently refresh the checksum — that wipes the edit-detection the
+    # whole chain integrity rides on. Refusal leaves the recorded
+    # checksum untouched; force=True accepts the new content.
+    _write(tmp_path, "0001_init.sql", SAFE_0001)
+    stamp(stamp_db, chain_dir=tmp_path)
+    edited = SAFE_0001.replace("mt1", "mt1_edited")
+    _write(tmp_path, "0001_init.sql", edited)
+    with pytest.raises(SqlpushError, match="0001_init.sql"):
+        stamp(stamp_db, chain_dir=tmp_path)
+    with stamp_db.connect() as conn:
+        sha = conn.execute(
+            text("SELECT sha256 FROM public.sqlpush_versions WHERE name = '0001_init.sql'")
+        ).scalar()
+    assert sha == checksum(SAFE_0001)  # la negativa NO refrescó el registro
+
+    rep = stamp(stamp_db, chain_dir=tmp_path, force=True)
+    assert rep.skipped == ("0001_init.sql",)
+    with stamp_db.connect() as conn:
+        sha2 = conn.execute(
+            text("SELECT sha256 FROM public.sqlpush_versions WHERE name = '0001_init.sql'")
+        ).scalar()
+    assert sha2 == checksum(edited)  # force acepta el contenido nuevo
+
+
+def test_stamp_mismatch_stops_the_walk(stamp_db, tmp_path):
+    # strict order on refusal too: the FIRST mismatch raises and nothing
+    # after it registers (same contract as migrate's blocked files)
+    _write(tmp_path, "0001_init.sql", SAFE_0001)
+    stamp(stamp_db, chain_dir=tmp_path)
+    _write(tmp_path, "0001_init.sql", SAFE_0001.replace("mt1", "mt1x"))  # edit post-stamp
+    _write(
+        tmp_path,
+        "0002_later.sql",
+        "-- sqlpush: revision=0002 risk=SAFE\nCREATE TABLE mt2 (id int);\n",
+    )
+    with pytest.raises(SqlpushError, match="0001_init.sql"):
+        stamp(stamp_db, chain_dir=tmp_path)
+    with stamp_db.connect() as conn:
+        later = conn.execute(
+            text("SELECT count(*) FROM public.sqlpush_versions WHERE name = '0002_later.sql'")
+        ).scalar()
+    assert later == 0  # nada posterior al mismatch se registra

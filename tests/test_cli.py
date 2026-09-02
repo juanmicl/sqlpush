@@ -247,6 +247,23 @@ def test_cli_migrate_advisory_wait_flag(cli_chain, tmp_path):
     assert r.exit_code == 0
 
 
+@pytest.mark.pg
+def test_cli_stamp_force_on_edited_file(cli_chain, tmp_path):
+    # B4 via the verb: stamp, edit the file, re-stamp without --force ->
+    # typed SqlpushError (exit 1 via main()'s fallback); with --force ->
+    # exit 0 with the checksum refreshed
+    (tmp_path / "0001_init.sql").write_text(CLI_SAFE_0001)
+    r0 = runner.invoke(app, ["stamp", *DSN_ARG, "--dir", str(tmp_path)])
+    assert r0.exit_code == 0
+    (tmp_path / "0001_init.sql").write_text(CLI_SAFE_0001.replace("cli_mt", "cli_mt_ed"))
+    r1 = runner.invoke(app, ["stamp", *DSN_ARG, "--dir", str(tmp_path)])
+    assert r1.exit_code == 1
+    assert isinstance(r1.exception, SqlpushError)
+    assert "0001_init.sql" in str(r1.exception)
+    r2 = runner.invoke(app, ["stamp", *DSN_ARG, "--dir", str(tmp_path), "--force"])
+    assert r2.exit_code == 0
+
+
 # --- unit tests below: api.push monkeypatched, no live PostgreSQL ---
 
 

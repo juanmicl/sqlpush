@@ -153,14 +153,18 @@ def run_migrate(
         )
 
 
-def run_stamp(engine: Engine, *, chain_dir: str | Path) -> MigrateReport:
+def run_stamp(engine: Engine, *, chain_dir: str | Path, force: bool = False) -> MigrateReport:
     """Register every parseable chain file WITHOUT executing any SQL.
 
     Bootstrap seam (spec §5 R7): adopt a DB whose schema already reflects
     the chain. Only the header must parse (fail-loud on THAT) — invalid SQL
-    in a body still registers, because stamp never executes anything. Each
-    registration is an idempotent upsert (``ON CONFLICT (name) DO UPDATE``),
-    so re-stamping refreshes checksums instead of failing.
+    in a body still registers, because stamp never executes anything. A
+    file already recorded with a DIFFERENT checksum is refused — it was
+    edited after apply/stamp, and silently refreshing would wipe the
+    edit-detection integrity — unless ``force`` is set; the first mismatch
+    raises and nothing after it registers (strict order, same as migrate).
+    Unrecorded files, unchanged re-stamps and forced re-stamps upsert
+    idempotently (``ON CONFLICT (name) DO UPDATE``).
 
     Report convention: registered files are listed in ``skipped`` (stamp
     never populates ``applied`` and never sets ``partial_failure``); a
@@ -172,6 +176,11 @@ def run_stamp(engine: Engine, *, chain_dir: str | Path) -> MigrateReport:
     notes: list[str] = []
     chain = _chain_files(chain_dir)
     with _chain_session(engine) as conn:
+        recorded = {
+            row[0]: row[1]
+            for row in conn.execute(text("SELECT name, sha256 FROM public.sqlpush_versions"))
+        }
+        conn.commit()
         for f in chain:
             raw = f.read_text()
             try:
@@ -180,6 +189,11 @@ def run_stamp(engine: Engine, *, chain_dir: str | Path) -> MigrateReport:
                 blocked.append(f.name)
                 notes.append(f"{f.name}: {exc}")
                 break  # orden estricto: nada posterior se registra
+            if f.name in recorded and recorded[f.name] != checksum(raw) and not force:
+                raise SqlpushError(
+                    f"{f.name}: checksum mismatch (file edited after apply?); "
+                    "pass force=True/--force to accept the new content"
+                )
             with conn.begin():
                 conn.execute(
                     text(

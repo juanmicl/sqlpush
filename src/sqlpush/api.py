@@ -194,16 +194,19 @@ def migrate(
             engine.dispose()
 
 
-def stamp(target, *, chain_dir="migrations/versions") -> MigrateReport:
+def stamp(target, *, chain_dir="migrations/versions", force: bool = False) -> MigrateReport:
     """Bootstrap: register chain files as applied WITHOUT executing SQL.
 
-    For adopting a DB whose schema already reflects the chain. ``target``
-    resolution and error typing match :func:`migrate`. See
-    ``chain.migrate.run_stamp`` for the report convention.
+    For adopting a DB whose schema already reflects the chain. A file
+    already registered with a different checksum (edited after apply)
+    is refused unless ``force`` is set — edit detection survives
+    re-stamping. ``target`` resolution and error typing match
+    :func:`migrate`. See ``chain.migrate.run_stamp`` for the report
+    convention.
     """
     engine, dispose = _sync_engine_from(target)
     try:
-        return run_stamp(engine, chain_dir=chain_dir)
+        return run_stamp(engine, chain_dir=chain_dir, force=force)
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched
         _raise_typed(exc)
