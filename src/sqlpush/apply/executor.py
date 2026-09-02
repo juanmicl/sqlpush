@@ -26,7 +26,10 @@ if TYPE_CHECKING:
 
 
 def _is_concurrent(op: PlannedOperation) -> bool:
-    return "CONCURRENTLY" in op.sql.upper()
+    # Union (A5): the `concurrent` flag is authoritative for generated
+    # plans (set by the diff's injection); the SQL substring keeps
+    # hand-built Plans splitting to the autocommit segment.
+    return op.concurrent or "CONCURRENTLY" in op.sql.upper()
 
 
 def apply_plan(

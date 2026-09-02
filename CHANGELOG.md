@@ -8,11 +8,23 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `CREATE INDEX` / `CREATE UNIQUE INDEX` on EXISTING tables now render
+  `CONCURRENTLY` by default in `plan` / `push` / `revision` output
+  (including `revision`-generated migration SQL): the plain form takes
+  a SHARE lock that blocks all writes for the whole build, while
+  CONCURRENTLY builds without blocking writers. Indexes on tables
+  created in the same plan stay plain — a brand-new table has no
+  concurrent writers, and the create stays inside the plan's atomic
+  transaction. Concurrently-rendered ops run on push's autocommit
+  segment (a failure there is a recorded partial failure, not a
+  rollback) and are still classified `risky`. Opt out per call with
+  `concurrently=False` (Python API on `plan` / `push` / `revision`;
+  CLI `--no-concurrently` on `push` / `revision`).
 - Every operation in the versioned plan JSON (`diff --json`,
   `check --json`, `Plan.to_json_dict`) now carries a `"concurrent"`
   boolean — additive to the v1 contract, no existing key or value
   changed. It reports whether the operation's SQL was rendered with
-  `CREATE INDEX CONCURRENTLY` (see the rendering change below).
+  `CREATE INDEX CONCURRENTLY` (see the rendering change above).
 
 ## [0.4.2] - 2026-09-02
 

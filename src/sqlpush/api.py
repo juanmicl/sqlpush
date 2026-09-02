@@ -48,8 +48,10 @@ def _raise_typed(exc: SQLAlchemyError) -> NoReturn:
     raise SqlpushError(f"database error: {exc}") from exc
 
 
-def _build_plan(metadata: MetaData, engine: Engine, schemas, exclude) -> Plan:
-    p = _engine.plan(metadata, engine, schemas=schemas, exclude=exclude)
+def _build_plan(
+    metadata: MetaData, engine: Engine, schemas, exclude, concurrently: bool = True
+) -> Plan:
+    p = _engine.plan(metadata, engine, schemas=schemas, exclude=exclude, concurrently=concurrently)
     return Plan(operations=p.operations + tuple(hypertable_operations(metadata, engine)))
 
 
@@ -65,8 +67,8 @@ class _PlannerWithDirectives(DiffEngine):
     def __init__(self, engine: DiffEngine) -> None:
         self._engine = engine
 
-    def plan(self, metadata, engine, *, schemas=None, exclude=()) -> Plan:
-        return _build_plan(metadata, engine, schemas, exclude)
+    def plan(self, metadata, engine, *, schemas=None, exclude=(), concurrently=True) -> Plan:
+        return _build_plan(metadata, engine, schemas, exclude, concurrently)
 
 
 def plan(metadata, engine, *, schemas=None, exclude=()) -> Plan:

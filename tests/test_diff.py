@@ -477,6 +477,127 @@ def _instrumented_geo_index(target, parent):
         Index(f"{target.name}_geo_col_idx", target.c.geo_col)
 
 
+# --- A1/A3: CONCURRENTLY-by-default for existing-table indexes --------------
+
+
+def test_concurrently_injected_for_existing_table_index_only(clean_db):
+    # A1: an index declared on an EXISTING table (no add_table op in the
+    # plan) renders CREATE INDEX CONCURRENTLY and carries the flag; a
+    # new-table-only plan carries no CONCURRENTLY anywhere (both the
+    # embedded-dedup survivors' counterparts and plain-declared new-table
+    # standalone indexes stay plain).
+    md = MetaData()
+    Table("conc_existing", md, Column("id", Integer, primary_key=True))
+    md.create_all(clean_db)
+    try:
+        md2 = MetaData()
+        Table(
+            "conc_existing",
+            md2,
+            Column("id", Integer, primary_key=True),
+            Column("email", String(50)),
+            Index("ix_conc_existing_email", "email"),
+        )
+        plan = DiffEngine().plan(md2, clean_db)
+        idx = [op for op in plan.operations if op.type == "add_index"]
+        assert [op.table for op in idx] == ["conc_existing"]
+        assert idx[0].sql.startswith("CREATE INDEX CONCURRENTLY ")
+        assert idx[0].concurrent is True
+
+        md3 = MetaData()
+        Table(
+            "conc_new",
+            md3,
+            Column("id", Integer, primary_key=True),
+            Column("email", String(50)),
+            Index("ix_conc_new_email", "email"),
+        )
+        plan2 = DiffEngine().plan(md3, clean_db)
+        assert plan2.drift  # sanity: the new-table plan is not vacuous
+        assert all("CONCURRENTLY" not in op.sql for op in plan2.operations)
+        assert all(not op.concurrent for op in plan2.operations)
+    finally:
+        with clean_db.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS conc_existing"))
+
+
+def test_dedup_invariant_survives_concurrent_injection(clean_db):
+    # A1 ordering: injection runs AFTER _dedup_embedded_indexes, so the
+    # dedup's byte-containment test never sees a CONCURRENTLY render.
+    # Geo-sim instrumentation (the F1/F2 mechanism): exactly one
+    # occurrence, the embedded copy stays PLAIN inside the add_table
+    # render, the standalone copy is deduped away and therefore never
+    # injected.
+    event.listen(Table, "after_parent_attach", _instrumented_geo_index)
+    try:
+        md = MetaData()
+        Table(
+            "geodup",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("geo_col", String(30)),
+        )
+        plan = DiffEngine().plan(md, clean_db)
+    finally:
+        event.remove(Table, "after_parent_attach", _instrumented_geo_index)
+    occurrences = sum("CREATE INDEX geodup_geo_col_idx" in op.sql for op in plan.operations)
+    assert occurrences == 1
+    add_table = [op for op in plan.operations if op.type == "add_table" and op.table == "geodup"]
+    assert len(add_table) == 1
+    assert "CREATE INDEX geodup_geo_col_idx" in add_table[0].sql
+    assert "CONCURRENTLY" not in add_table[0].sql
+    assert not any(op.type == "add_index" and op.table == "geodup" for op in plan.operations)
+    assert all("CONCURRENTLY" not in op.sql for op in plan.operations)
+
+
+def test_new_table_standalone_index_stays_plain(clean_db):
+    # A1 guard: a plain-declared index on a NEW table survives the
+    # embedded-index dedup trivially (standalone-only render) — the
+    # new_tables guard must keep it PLAIN (CREATE INDEX inside the same
+    # plan that creates the table is always correct and transactional).
+    md = MetaData()
+    Table(
+        "conc_new_standalone",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+        Index("ix_conc_new_standalone_email", "email"),
+    )
+    plan = DiffEngine().plan(md, clean_db)
+    idx = [op for op in plan.operations if op.type == "add_index"]
+    assert [op.table for op in idx] == ["conc_new_standalone"]
+    assert idx[0].sql.startswith("CREATE INDEX ")
+    assert "CONCURRENTLY" not in idx[0].sql
+    assert idx[0].concurrent is False
+
+
+def test_concurrently_opt_out(clean_db):
+    # A3: concurrently=False skips the injection entirely — same plan,
+    # plain renders, no flag. (The end-to-end and lock-path halves of
+    # the opt-out live in test_api.py: they need api threading.)
+    md = MetaData()
+    Table("conc_optout", md, Column("id", Integer, primary_key=True))
+    md.create_all(clean_db)
+    try:
+        md2 = MetaData()
+        Table(
+            "conc_optout",
+            md2,
+            Column("id", Integer, primary_key=True),
+            Column("email", String(50)),
+            Index("ix_conc_optout_email", "email"),
+        )
+        plan = DiffEngine().plan(md2, clean_db, concurrently=False)
+        idx = [op for op in plan.operations if op.type == "add_index"]
+        assert len(idx) == 1
+        assert idx[0].sql.startswith("CREATE INDEX ")
+        assert "CONCURRENTLY" not in idx[0].sql
+        assert idx[0].concurrent is False
+    finally:
+        with clean_db.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS conc_optout"))
+
+
 def test_instrumented_index_renders_once(clean_db):
     # The REAL duplication mechanism (fire-test F1/F2): on alembic
     # 1.19.1 CreateTableOp.from_table captures columns+constraints only,

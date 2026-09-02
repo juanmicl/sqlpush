@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import io
+import re
 from collections.abc import Sequence
 
 from alembic.autogenerate import produce_migrations
@@ -464,6 +466,43 @@ def _render_op_sql(op, engine: Engine) -> str:
     return buf.getvalue().strip().rstrip(";")
 
 
+# A1: match the CREATE [UNIQUE] INDEX head of an op's (single-statement)
+# SQL. Anchored with no MULTILINE and sub'd with count=1: only the op's
+# own leading statement is touched. The lookahead makes it idempotent —
+# a second pass over an already-injected render finds CONCURRENTLY right
+# after the consumed whitespace and declines. IF NOT EXISTS lands after
+# the inserted keyword, which is the correct PostgreSQL order.
+_CONCURRENTLY_RE = re.compile(
+    r"^(CREATE\s+(?:UNIQUE\s+)?INDEX)\s+(?!CONCURRENTLY\s)", re.IGNORECASE
+)
+
+
+def _render_concurrent(ops: list[PlannedOperation]) -> list[PlannedOperation]:
+    """Render standalone ``add_index`` ops on EXISTING tables CONCURRENTLY.
+
+    Plain ``CREATE INDEX`` takes a SHARE lock that blocks all writes on
+    the table for the whole build; ``CREATE INDEX CONCURRENTLY`` is the
+    production-safe form for tables that already carry traffic. Indexes
+    on tables CREATED in the same plan stay plain: a brand-new table has
+    no concurrent writers to protect, and CONCURRENTLY cannot run inside
+    the plan's transactional create. The new-table guard keys on bare
+    table names (``op.table``), which is conservative-correct: a false
+    "new" (cross-schema bare-name collision) yields a plain
+    ``CREATE INDEX`` — always executable — while the dangerous direction
+    (injecting on a new table) cannot happen.
+    """
+    new_tables = {op.table for op in ops if op.type == "add_table"}
+    out: list[PlannedOperation] = []
+    for op in ops:
+        if op.type == "add_index" and op.table not in new_tables:
+            sql = _CONCURRENTLY_RE.sub(r"\1 CONCURRENTLY ", op.sql, count=1)
+            if sql != op.sql:
+                out.append(dataclasses.replace(op, sql=sql, concurrent=True))
+                continue
+        out.append(op)
+    return out
+
+
 class DiffEngine:
     def plan(
         self,
@@ -472,6 +511,7 @@ class DiffEngine:
         *,
         schemas: Sequence[str] | None = None,
         exclude: Sequence[str] = (),
+        concurrently: bool = True,
     ) -> Plan:
         exclude = tuple(exclude)
         # Typed `str | None` by SQLAlchemy; a dialect without a default
@@ -516,6 +556,15 @@ class DiffEngine:
             ops.extend(self._translate(op, engine, exclude))
         ops = _dedup_embedded_indexes(ops)
         ops = _dedup_enum_types(ops)
+        # ORDERING INVARIANT: CONCURRENTLY injection must run AFTER both
+        # dedups, as the final pipeline stage. _dedup_embedded_indexes
+        # matches standalone renders against the add_table render by
+        # byte containment — injecting first would rewrite only the
+        # standalone copy, break the byte-identity, and let the pair
+        # execute twice. By construction the dedup never sees a
+        # CONCURRENTLY render.
+        if concurrently:
+            ops = _render_concurrent(ops)
         return Plan(operations=tuple(ops))
 
     def _translate(self, op, engine: Engine, exclude: tuple[str, ...]) -> list[PlannedOperation]:

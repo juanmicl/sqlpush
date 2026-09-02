@@ -133,3 +133,47 @@ def test_concurrently_split_and_partial_failure(hero_table):
     statuses = {a.type + a.status for a in report.applied}
     assert any("failed" in s for s in statuses)
     assert "a" in _cols(hero_table)  # txn segment still ran
+
+
+def test_executor_detection_flag_union(hero_table):
+    # A5: detection is op.concurrent OR the SQL substring. The flag is
+    # authoritative for generated plans; the substring keeps hand-built
+    # Plans (no flag, pre-0.5 SQL) splitting to the autocommit segment.
+    # (a) unflagged op with CONCURRENTLY SQL: routes to the concurrent
+    # segment — executed on autocommit it SUCCEEDS (in a txn it would
+    # die with "cannot run inside a transaction block" and raise).
+    plan = Plan(
+        operations=(
+            PlannedOperation(  # no flag on purpose (default False)
+                type="add_index",
+                risk=RiskClass.RISKY,
+                sql="CREATE INDEX CONCURRENTLY ix_flag_u ON hero (id)",
+                table="hero",
+            ),
+            _col_op(sql="ALTER TABLE hero ADD COLUMN a INT"),
+        )
+    )
+    report = apply_plan(hero_table, plan)
+    assert report.partial_failure is False
+    with hero_table.connect() as conn:
+        ok = conn.execute(text("SELECT 1 FROM pg_indexes WHERE indexname = 'ix_flag_u'")).scalar()
+    assert ok is not None
+    assert "a" in _cols(hero_table)
+
+    # (b) flagged op WITHOUT CONCURRENTLY SQL: routes to the concurrent
+    # segment too — a failing op there is a recorded partial failure,
+    # whereas the txn segment would raise SqlpushError (rollback).
+    plan2 = Plan(
+        operations=(
+            PlannedOperation(
+                type="add_index",
+                risk=RiskClass.RISKY,
+                sql="CREATE INDEX ix_flag_bad ON hero (nope)",
+                table="hero",
+                concurrent=True,
+            ),
+        )
+    )
+    report2 = apply_plan(hero_table, plan2)
+    assert report2.partial_failure is True
+    assert [a.status for a in report2.applied] == ["failed"]
