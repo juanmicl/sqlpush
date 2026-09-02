@@ -5,7 +5,7 @@ from sqlalchemy import MetaData, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import ProgrammingError
 
-from sqlpush.annotations import HYPERTABLE_KEY
+from sqlpush.annotations import HYPERTABLE_KEY, create_hypertable_sql
 from sqlpush.types import PlannedOperation, RiskClass
 
 
@@ -27,12 +27,6 @@ def _is_hypertable(conn: Connection, schema: str, table_name: str) -> bool:
         # own error: annotated models on non-timescale DBs are user
         # error, not a state probe failure.
         return False
-
-
-def _lit(value: str) -> str:
-    # single-quoted SQL literal escaping: ' -> '' (defense in depth
-    # against quote break-out via table/column names from user metadata)
-    return value.replace("'", "''")
 
 
 def hypertable_operations(
@@ -58,31 +52,14 @@ def hypertable_operations(
     ops: list[PlannedOperation] = []
     for table in pending:
         info = table.info[HYPERTABLE_KEY]
-        # Schema-qualified relation: create_hypertable resolves an
-        # unqualified name via the session search_path, so a table in a
-        # non-default schema MUST carry its schema or the op lands on
-        # public.<name> (UndefinedTable). Schema-less tables keep the
-        # bare name: they live in the default schema, which the
-        # search_path already resolves.
-        relation = table.name if table.schema is None else f"{table.schema}.{table.name}"
-        name = _lit(relation)
-        time_column = _lit(info.time_column)
-        parts = [f"SELECT create_hypertable('{name}', '{time_column}'"]
-        if info.chunk_time_interval:
-            parts.append(f", chunk_time_interval => INTERVAL '{_lit(info.chunk_time_interval)}'")
-        parts.append(", migrate_data => true")
-        # if_not_exists: race insurance between the state check above
-        # and the apply. create_default_indexes=false: timescale's
-        # implicit time-column index is invisible to metadata, so the
-        # default would drift forever (destructive drop_index) on a
-        # fully synced schema; users declare wanted indexes in the
-        # Table instead (metadata is the source of truth).
-        parts.append(", if_not_exists => true, create_default_indexes => false)")
+        # SQL parity with the decorator's after_create listener is by
+        # construction: both render through create_hypertable_sql (the
+        # directive's render adds the statement terminator).
         ops.append(
             PlannedOperation(
                 type="create_hypertable",
                 risk=RiskClass.SAFE,
-                sql="".join(parts) + ";",
+                sql=create_hypertable_sql(table.name, table.schema, info) + ";",
                 table=table.name,
             )
         )

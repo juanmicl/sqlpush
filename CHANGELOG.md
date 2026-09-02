@@ -6,6 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `@hypertable` is now dual-mechanism: besides recording the annotation on
+  `Table.info` (planned as a `create_hypertable` op on push/revision), the
+  decorator registers an `after_create` listener on the table so
+  `MetaData.create_all` paths register the hypertable too. The listener runs
+  the same idempotent SQL the directive plans (`if_not_exists => true,
+  create_default_indexes => false`), so coexistence with a later push is
+  duplicate-free and `check()` stays clean.
+- `create_hypertable` rendering is now a single shared helper
+  (`sqlpush.annotations.create_hypertable_sql`) consumed by both the
+  directive and the listener — the two mechanisms cannot drift apart.
+
 ## [0.4.0] - 2026-09-02
 
 ### Added
