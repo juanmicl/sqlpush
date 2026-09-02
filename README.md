@@ -4,12 +4,12 @@
 [![Python](https://img.shields.io/pypi/pyversions/sqlpush?style=for-the-badge)](https://pypi.org/project/sqlpush/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 
-**Prisma `db push` for SQLAlchemy.** Apply your models (SQLAlchemy,
-SQLModel, anything built on `MetaData`) to a live PostgreSQL / TimescaleDB
-database directly, no migration files required. sqlpush
-diffs your models against the real schema, classifies every operation by
-risk (safe / risky / destructive), and applies the plan atomically. Drift
-checks exit with codes your CI can gate on.
+**Prisma `db push` for SQLAlchemy.** Your models are the migration.
+sqlpush diffs them (SQLAlchemy, SQLModel, anything built on `MetaData`)
+against the live PostgreSQL / TimescaleDB database, classifies every
+operation by risk (safe / risky / destructive), and applies the plan
+atomically. No migration files to write, no `upgrade` step to forget.
+Drift checks exit with codes your CI can gate on.
 
 ```console
 sqlpush diff "myapp.models:metadata"      # see the SQL, ordered by risk
@@ -110,6 +110,51 @@ $ echo $?
 In CI, check drift and fail loudly (see exit codes below). Limit scope with
 repeated `--schema` / `--exclude` options.
 
+## FastAPI: retire `create_all()`
+
+Most FastAPI + SQLModel apps ship the lifespan the tutorials teach:
+
+```python
+@asynccontextmanager
+async def lifespan(app):
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+    yield
+```
+
+`create_all` creates tables that are missing. That is all it ever
+does. Add a column to a model and the database never hears about it;
+an index on an existing table, a type change, a drop: nothing.
+Production drifts from the models in silence, so every real change
+still rides the alembic treadmill: autogenerate, review, upgrade, and
+two histories to keep in agreement forever.
+
+The sqlpush lifespan is one line:
+
+```python
+from contextlib import asynccontextmanager
+from sqlpush import aensure_schema
+
+
+@asynccontextmanager
+async def lifespan(app):
+    await aensure_schema(SQLModel.metadata, engine, mode="check")
+    yield
+```
+
+`mode="check"` verifies the models against the database at startup and
+raises when they disagree: the app refuses to boot against a schema it
+does not match, which beats failing on the first query at 3am. The
+schema change itself comes from wherever you put it: `sqlpush push` in
+the deploy pipeline (destructive ops gated), or
+`ensure_schema(..., mode="push")` when you want the API to apply it.
+
+asyncpg URLs work too: a DSN or `AsyncEngine` spelling
+`postgresql+asyncpg` is translated to the psycopg driver automatically,
+and asyncpg is never required in the sqlpush process.
+
+Push in the deploy pipeline, check at boot.
+
 ## An inherited database
 
 The first `check` against a database with history often reports drift:
@@ -159,24 +204,6 @@ Timeouts are seconds; a `lock_timeout` bounds how long a statement
 waits on a lock before failing, `statement_timeout` bounds each
 statement's runtime, and an exhausted `advisory-wait` raises instead
 of hanging on a stuck lock holder.
-
-## FastAPI / SQLModel: replace `create_all`
-
-```python
-from contextlib import asynccontextmanager
-from sqlpush import aensure_schema
-
-
-@asynccontextmanager
-async def lifespan(app):
-    await aensure_schema(SQLModel.metadata, engine, mode="check")
-    yield
-```
-
-Push in the deploy pipeline, check at startup. asyncpg URLs work too:
-a DSN or `AsyncEngine` spelling `postgresql+asyncpg` is translated to
-the psycopg driver automatically, and asyncpg is never required in the
-sqlpush process.
 
 ## How it works
 

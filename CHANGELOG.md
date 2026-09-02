@@ -17,7 +17,10 @@ the project follows [Semantic Versioning](https://semver.org/).
   equivalence proof; no automated revision conversion, stated up
   front). The README now documents all six verbs: the full exit-code
   table, a per-verb flags reference, the inherited-database story, and
-  schema-scoping facts.
+  schema-scoping facts. The front page leads with the `create_all`
+  retirement story (the tutorial lifespan against the one-line
+  `aensure_schema(..., mode="check")` boot guard), and the PyPI
+  keywords now include `fastapi` and `sqlmodel`.
 
 ## [0.5.0] - 2026-09-02
 
