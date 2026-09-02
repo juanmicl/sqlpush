@@ -182,7 +182,6 @@ deprecated)? There is a [migration guide](docs/migrating-from-migra.md).
 
 ## Roadmap (0.1.x)
 
-- asyncpg DSN translation in `ensure_schema(AsyncEngine)`
 - jsonschema-validated `--json` output
 
 ## License
