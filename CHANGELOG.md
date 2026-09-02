@@ -22,6 +22,11 @@ the project follows [Semantic Versioning](https://semver.org/).
   registers) instead of overwriting the registry. `--force` (API:
   `force=True`) accepts the new content, so the chain's edit-detection
   integrity survives re-stamping.
+- `migrate` now sets a per-file transaction-scoped `lock_timeout`
+  (default 5s), mirroring `push`: a chain file whose DDL is blocked
+  behind another transaction's lock fails fast with a typed error
+  instead of queuing indefinitely. Tunable via `--lock-timeout`
+  (API: `lock_timeout=`; negative values are rejected up front).
 
 ## [0.4.1] - 2026-09-02
 

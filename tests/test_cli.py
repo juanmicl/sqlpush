@@ -237,12 +237,23 @@ def cli_chain(pg_engine):
 
 
 @pytest.mark.pg
-def test_cli_migrate_advisory_wait_flag(cli_chain, tmp_path):
-    # --advisory-wait parses and routes through; no holder + an empty
-    # (existing) dir is a legitimate idle run -> exit 0
+def test_cli_migrate_new_flags_parse_and_succeed(cli_chain, tmp_path):
+    # --advisory-wait / --lock-timeout parse and route through; no
+    # holder + an empty (existing) dir is a legitimate idle run -> 0
     tmp_path.mkdir(exist_ok=True)
     r = runner.invoke(
-        app, ["migrate", "--dsn", DSN, "--dir", str(tmp_path), "--advisory-wait", "3"]
+        app,
+        [
+            "migrate",
+            "--dsn",
+            DSN,
+            "--dir",
+            str(tmp_path),
+            "--advisory-wait",
+            "3",
+            "--lock-timeout",
+            "2",
+        ],
     )
     assert r.exit_code == 0
 

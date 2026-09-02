@@ -96,7 +96,13 @@ def run_migrate(
     chain_dir: str | Path,
     allow_destructive: bool,
     advisory_wait: float = 30.0,
+    lock_timeout: float = 5.0,
 ) -> MigrateReport:
+    if lock_timeout < 0:
+        # same contract as push (executor.with_advisory_lock): budgets
+        # are typed floats, never user input, and a negative one must
+        # fail before any file or connection work
+        raise SqlpushError(f"lock_timeout must be >= 0, got {lock_timeout}")
     applied: list[str] = []
     skipped: list[str] = []
     blocked: list[str] = []
@@ -130,6 +136,14 @@ def run_migrate(
                 break
             try:
                 with conn.begin():
+                    # txn-scoped: SET LOCAL dies with the per-file txn
+                    # (style: push's transactional segment, executor.py).
+                    # NOTE: PostgreSQL does not accept bind parameters for
+                    # SET (utility statement), so the int is inlined;
+                    # lock_timeout is a typed float parameter, not user
+                    # input. A chain file blocked behind another
+                    # transaction's lock fails fast instead of queuing.
+                    conn.execute(text(f"SET LOCAL lock_timeout = {int(lock_timeout * 1000)}"))
                     # whole-file replay: exec_driver_sql bypasses text()'s
                     # bind-param parsing entirely — ":casts" and ":=" in
                     # hand-edited SQL must reach the server verbatim

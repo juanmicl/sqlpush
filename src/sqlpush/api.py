@@ -139,7 +139,12 @@ def revision(
     risk = max((op.risk for op in p.operations), key=lambda r: RISK_RANK[r])
     ops = [(f"[{op.risk.name}] {op.type} {op.table or '?'}", op.sql) for op in p.operations]
     out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # same typing as the write below: only SqlpushError subclasses
+        # escape the API surface (e.g. out_dir under a file)
+        raise SqlpushError(f"cannot create migrations directory {out}: {exc}") from exc
     rev_id = next_revision_id(out)
     slug = re.sub(r"[^a-z0-9_]+", "_", (message or "migration").lower())[:40]
     path = out / f"{rev_id}_{slug}.sql"
@@ -169,13 +174,15 @@ def migrate(
     chain_dir="migrations/versions",
     allow_destructive=False,
     advisory_wait=30.0,
+    lock_timeout=5.0,
 ) -> MigrateReport:
     """Replay annotated-SQL chain files with gates + same-txn bookkeeping.
 
     ``target`` is a DSN string, sync ``Engine`` or ``AsyncEngine`` (resolved
     via ``_sync_engine_from``; engines created here are disposed).
-    ``advisory_wait`` bounds the advisory-lock wait (seconds; 0 = fail
-    immediately if held — same contract as ``push``). See
+    ``advisory_wait`` bounds the advisory-lock wait and ``lock_timeout``
+    bounds each per-file transaction's lock wait (seconds; 0 = fail
+    immediately — same contract as ``push``). See
     ``chain.migrate.run_migrate`` for the execution contract.
     """
     engine, dispose = _sync_engine_from(target)
@@ -185,6 +192,7 @@ def migrate(
             chain_dir=chain_dir,
             allow_destructive=allow_destructive,
             advisory_wait=advisory_wait,
+            lock_timeout=lock_timeout,
         )
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched
