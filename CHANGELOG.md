@@ -8,11 +8,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Documentation: a chain guide (`docs/the-chain.md` — the three verbs,
+- Documentation: a chain guide (`docs/the-chain.md`: the three verbs,
   file format, migrate's gates, CONCURRENTLY replay semantics, the
   data-backfill workflow, the hand-authored `0000_extensions.sql`
   pattern, and an honest-limitations list) and an alembic migration
-  guide (`docs/migrating-from-alembic.md` — parity check first, the
+  guide (`docs/migrating-from-alembic.md`: parity check first, the
   empty-chain baseline, dual-run switchover, and a scratch-DB
   equivalence proof; no automated revision conversion, stated up
   front). The README now documents all six verbs: the full exit-code

@@ -137,7 +137,7 @@ Failures print a typed error on stderr, never a traceback.
 informationally (exit `0`). Indexes on existing tables build
 `CONCURRENTLY` by default (opt out with `--no-concurrently`); a failed
 `CREATE INDEX CONCURRENTLY` marks the run as partial failure (exit `2`)
-instead of silently half-applying, and leaves an INVALID index — drop it
+instead of silently half-applying, and leaves an INVALID index: drop it
 (`DROP INDEX CONCURRENTLY`) and re-push. `stamp` refuses a file whose
 checksum no longer matches the registry; `--force` accepts the new
 content.
