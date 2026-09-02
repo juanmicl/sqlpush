@@ -17,13 +17,14 @@ SCHEMA = {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["type", "risk", "table", "column", "sql"],
+                "required": ["type", "risk", "table", "column", "sql", "concurrent"],
                 "properties": {
                     "type": {"type": "string"},
                     "risk": {"enum": ["safe", "risky", "destructive"]},
                     "table": {"type": ["string", "null"]},
                     "column": {"type": ["string", "null"]},
                     "sql": {"type": "string"},
+                    "concurrent": {"type": "boolean"},
                 },
             },
         },
@@ -54,3 +55,34 @@ def test_contract_valid_and_golden():
         golden.parent.mkdir(exist_ok=True)
         golden.write_text(json.dumps(payload, indent=2) + "\n")
     assert json.loads(golden.read_text()) == payload
+
+
+def test_json_contract_v1_additive_concurrent():
+    # A5: `concurrent` is ADDITIVE to JSON v1 — every operation carries
+    # it (a boolean, never null), and the pre-existing keys keep their
+    # exact values (byte-stable against the golden).
+    payload = _sample().to_json_dict()
+    op = payload["operations"][0]
+    assert op["concurrent"] is False
+    jsonschema.validate(payload, SCHEMA)
+    golden = json.loads((Path(__file__).parent / "golden" / "plan_v1.json").read_text())
+    assert golden["operations"][0]["concurrent"] is False
+    # the five v1 keys are untouched: same keys, same values
+    for key in ("type", "risk", "table", "column", "sql"):
+        assert op[key] == golden["operations"][0][key]
+    # a CONCURRENTLY-rendered op reports true
+    from sqlpush.types import Plan as _Plan
+
+    flagged = _Plan(
+        operations=(
+            PlannedOperation(
+                type="add_index",
+                risk=RiskClass.RISKY,
+                sql="CREATE INDEX CONCURRENTLY ix ON t (c)",
+                table="t",
+                concurrent=True,
+            ),
+        )
+    ).to_json_dict()
+    assert flagged["operations"][0]["concurrent"] is True
+    jsonschema.validate(flagged, SCHEMA)

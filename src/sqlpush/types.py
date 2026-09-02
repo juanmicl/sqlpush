@@ -19,6 +19,11 @@ class PlannedOperation:
     sql: str
     table: str | None = None
     column: str | None = None
+    # True when the op's SQL was rendered with CONCURRENTLY (the
+    # executor's authoritative routing signal for generated plans;
+    # hand-built plans keep the SQL-substring fallback). Defaults False
+    # so every pre-existing construction site is unchanged.
+    concurrent: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,7 @@ class Plan:
                     "table": op.table,
                     "column": op.column,
                     "sql": op.sql,
+                    "concurrent": op.concurrent,
                 }
                 for op in self.operations
             ],

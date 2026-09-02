@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Every operation in the versioned plan JSON (`diff --json`,
+  `check --json`, `Plan.to_json_dict`) now carries a `"concurrent"`
+  boolean — additive to the v1 contract, no existing key or value
+  changed. It reports whether the operation's SQL was rendered with
+  `CREATE INDEX CONCURRENTLY` (see the rendering change below).
+
 ## [0.4.2] - 2026-09-02
 
 ### Fixed
