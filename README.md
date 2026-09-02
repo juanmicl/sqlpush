@@ -6,7 +6,7 @@
 
 **Prisma `db push` for SQLAlchemy.** Apply your models (SQLAlchemy,
 SQLModel, anything built on `MetaData`) to a live PostgreSQL / TimescaleDB
-database directly, no migration files. sqlpush
+database directly, no migration files required. sqlpush
 diffs your models against the real schema, classifies every operation by
 risk (safe / risky / destructive), and applies the plan atomically. Drift
 checks exit with codes your CI can gate on.
@@ -28,9 +28,10 @@ re-encode what the models say, drift from them, and pile up forever.
 sqlpush closes the loop the way Prisma's `db push` does for its schema
 language, but for the SQLAlchemy ecosystem (SQLModel included):
 
-- **No migration files, ever.** The diff *is* the migration: computed fresh
+- **No migration files required.** The diff *is* the migration: computed fresh
   from models vs. live database on every run, via alembic's autogenerate
-  engine used as a library.
+  engine used as a library. Files exist as a second workflow when you want
+  them (see below).
 - **Risk-aware by default.** Every operation is classified `safe` /
   `risky` / `destructive`. Destructive ops (drops) are **blocked until
   `--allow-destructive`**: nothing executes at all while any is present.
@@ -45,6 +46,20 @@ language, but for the SQLAlchemy ecosystem (SQLModel included):
   state-aware: idempotent pushes, clean checks, no false drift.
 
 PostgreSQL only, by design.
+
+## When you want files: the chain
+
+The push workflow has no files because most of the time you don't need
+them. When you do, sqlpush has a second workflow built on the same
+diff engine: the chain. `revision` writes the next numbered SQL file
+from your models against a reference DB, `migrate` replays pending
+files with gates and checksums, and `stamp` adopts an existing
+database without executing anything.
+
+The files are plain SQL you can review, edit before first apply, and
+run under `psql`. Schema change and data backfill ship as one file.
+The [chain guide](docs/the-chain.md) covers the format, the gates and
+the workflows.
 
 ## Install
 
@@ -95,6 +110,16 @@ $ echo $?
 In CI, check drift and fail loudly (see exit codes below). Limit scope with
 repeated `--schema` / `--exclude` options.
 
+## An inherited database
+
+The first `check` against a database with history often reports drift:
+hand-built indexes, audit tables, that column someone added at 2am. If
+any of the drift looks destructive, `check` exits `3` and `push`
+blocks. That is the tool refusing to silently drop your legacy
+objects. Two escape hatches: `--exclude` accepts objects you choose to
+keep (fnmatch patterns, repeatable), and `--allow-destructive` accepts
+the drops when you really do want them.
+
 ## Exit codes
 
 | verb | 0 | 1 | 2 | 3 |
@@ -102,13 +127,38 @@ repeated `--schema` / `--exclude` options.
 | `diff` | always | | | |
 | `check` | clean | | drift | destructive drift |
 | `push` | applied | destructive blocked | error (incl. partial failure) | |
+| `revision` | file written | error (empty drift refuses) | | |
+| `migrate` | clean | blocked or partial failure | | |
+| `stamp` | registered | blocked or refused | | |
+
+Failures print a typed error on stderr, never a traceback.
 
 `push --safe-only` runs only safe operations and skips the rest
 informationally (exit `0`). Indexes on existing tables build
 `CONCURRENTLY` by default (opt out with `--no-concurrently`); a failed
 `CREATE INDEX CONCURRENTLY` marks the run as partial failure (exit `2`)
 instead of silently half-applying, and leaves an INVALID index — drop it
-(`DROP INDEX CONCURRENTLY`) and re-push.
+(`DROP INDEX CONCURRENTLY`) and re-push. `stamp` refuses a file whose
+checksum no longer matches the registry; `--force` accepts the new
+content.
+
+The knobs, per verb:
+
+| verb | flags |
+| --- | --- |
+| `push` | `--allow-destructive` `--safe-only` `--no-lock` `--lock-timeout` `--advisory-wait` `--no-concurrently` `--statement-timeout` |
+| `revision` | `--ref-dsn` (required) `-m/--message` `--no-concurrently` `--dir` |
+| `migrate` | `--allow-destructive` `--advisory-wait` `--lock-timeout` `--statement-timeout` `--dir` |
+| `stamp` | `--force` `--dir` |
+
+Every verb except `revision` takes `--dsn` (or `$DATABASE_URL`).
+`revision` requires `--ref-dsn`, with no env fallback: the reference
+DB is a different database from the push target. `diff`, `check`,
+`push` and `revision` also take repeatable `--schema` / `--exclude`.
+Timeouts are seconds; a `lock_timeout` bounds how long a statement
+waits on a lock before failing, `statement_timeout` bounds each
+statement's runtime, and an exhausted `advisory-wait` raises instead
+of hanging on a stuck lock holder.
 
 ## FastAPI / SQLModel: replace `create_all`
 
@@ -123,7 +173,10 @@ async def lifespan(app):
     yield
 ```
 
-Push in the deploy pipeline, check at startup.
+Push in the deploy pipeline, check at startup. asyncpg URLs work too:
+a DSN or `AsyncEngine` spelling `postgresql+asyncpg` is translated to
+the psycopg driver automatically, and asyncpg is never required in the
+sqlpush process.
 
 ## How it works
 
@@ -151,13 +204,20 @@ flowchart LR
 - **Typed errors**: only `SqlpushError` / `ConnectFailed` /
   `MetadataImportError` escape the API, never raw driver exceptions.
 
+Scoping: `--schema` restricts the diff to named schemas (default: the
+session's real `search_path`). Extension-owned schemas never enter
+scope automatically, and schemas you pass explicitly are never
+filtered. The chain's registry table (`public.sqlpush_versions`)
+always lives in `public` and is pruned from every diff, so `check`
+after `migrate` is clean. `alembic_version` gets the same treatment.
+
 ## Comparison
 
 An honest view of the neighborhood (stars as of 2026-08):
 
 | | migration files | source of truth | risk gate | CI drift exit codes | TimescaleDB |
 | --- | --- | --- | --- | --- | --- |
-| **sqlpush** | none (the diff is the migration) | SQLAlchemy `MetaData` | classified safe/risky/destructive, destructive blocked by default | `check` 0/2/3 | `@hypertable` directives |
+| **sqlpush** | optional: push needs none; the chain has reviewable, checksummed files | SQLAlchemy `MetaData` | classified safe/risky/destructive, destructive blocked by default | `check` 0/2/3 | `@hypertable` directives |
 | [alembic](https://github.com/sqlalchemy/alembic) (4.4k★) | yes | migration scripts (autogenerate assists) | no | no | no |
 | [atlas](https://github.com/ariga/atlas) (8.7k★) | optional (HCL) | HCL / SQL (ORMs via providers) | lint policies | yes | no |
 | [prisma `db push`](https://www.prisma.io/docs/orm/reference/prisma-cli-reference) (47k★) | none | Prisma schema (Node/TS) | no | no | no |
@@ -167,8 +227,9 @@ sqlpush is narrower than atlas and younger than alembic, deliberately.
 It is one tool for one job: keep a PostgreSQL schema in lockstep with
 SQLAlchemy models, safely enough to run from CI.
 
-Coming from [migra](https://github.com/djrobstep/migra) (now
-deprecated)? There is a [migration guide](docs/migrating-from-migra.md).
+Guides: [the chain](docs/the-chain.md) (file format, gates, backfills),
+[migrating from alembic](docs/migrating-from-alembic.md), and
+[migrating from migra](docs/migrating-from-migra.md) (deprecated).
 
 ## Design notes
 
@@ -180,7 +241,7 @@ deprecated)? There is a [migration guide](docs/migrating-from-migra.md).
   tooling; additive changes only within a version (operations now carry
   a `concurrent` boolean).
 
-## Roadmap (0.1.x)
+## Roadmap
 
 - jsonschema-validated `--json` output
 
