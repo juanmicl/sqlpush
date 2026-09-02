@@ -86,6 +86,15 @@ def test_migrate_rejects_negative_budgets(kwargs, tmp_path):
         api.migrate(_lazy_engine(), chain_dir=tmp_path, **kwargs)
 
 
+# --- B12 (0.5.0): migrate statement_timeout validation (validation runs
+# before any connection attempt, so DB-free like I4) ------------------------
+
+
+def test_statement_timeout_negative_rejected(tmp_path):
+    with pytest.raises(SqlpushError, match=">= 0"):
+        api.migrate(_lazy_engine(), chain_dir=tmp_path, statement_timeout=-1)
+
+
 # --- B12 (0.5.0): push statement_timeout budget validation (validation
 # runs before any connection attempt, so DB-free like I4/B3) ---------------
 

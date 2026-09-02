@@ -24,6 +24,12 @@ the project follows [Semantic Versioning](https://semver.org/).
   hand-edit cost: a label-less body containing CONCURRENTLY routes to
   the autocommit lane, and lines starting `--` are stripped from
   per-op parsing.
+- `migrate` gains `--statement-timeout` (API:
+  `migrate(..., statement_timeout=...)`, seconds, unset by default):
+  applied as `SET LOCAL` in every per-file transaction and as a session
+  `statement_timeout` on the CONCURRENTLY autocommit connection (RESET
+  before it closes). Negative values are rejected up front with a
+  typed `SqlpushError` — same contract as `push`.
 
 - CLI: `push` and `revision` gain `--no-concurrently` (opt out of the
   CONCURRENTLY-by-default index rendering; plain `CREATE INDEX` builds)

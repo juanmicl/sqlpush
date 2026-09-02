@@ -259,6 +259,7 @@ def migrate(
     allow_destructive: bool = typer.Option(False, "--allow-destructive"),
     advisory_wait: float = typer.Option(30.0, "--advisory-wait"),
     lock_timeout: float = typer.Option(5.0, "--lock-timeout"),
+    statement_timeout: float | None = typer.Option(None, "--statement-timeout"),
     out_dir: DirOpt = Path("migrations/versions"),
 ):
     """Replay pending migration files (gates + checksum bookkeeping)."""
@@ -270,6 +271,7 @@ def migrate(
             allow_destructive=allow_destructive,
             advisory_wait=advisory_wait,
             lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
         )
     finally:
         engine.dispose()

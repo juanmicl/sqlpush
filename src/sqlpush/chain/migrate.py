@@ -60,14 +60,18 @@ def _chain_files(chain_dir: str | Path) -> list[Path]:
     return sorted(chain_path.glob("*.sql"))
 
 
-def _set_local_gucs(conn: Connection, *, lock_timeout: float) -> None:
+def _set_local_gucs(
+    conn: Connection, *, lock_timeout: float, statement_timeout: float | None
+) -> None:
     # txn-scoped: SET LOCAL dies with the surrounding transaction (style:
     # push's transactional segment, executor.py). NOTE: PostgreSQL does
-    # not accept bind parameters for SET (utility statement), so the int
-    # is inlined; lock_timeout is a typed float parameter, not user
+    # not accept bind parameters for SET (utility statement), so ints
+    # are inlined; both timeouts are typed float parameters, not user
     # input. A chain file blocked behind another transaction's lock
     # fails fast instead of queuing.
     conn.execute(text(f"SET LOCAL lock_timeout = {int(lock_timeout * 1000)}"))
+    if statement_timeout is not None:
+        conn.execute(text(f"SET LOCAL statement_timeout = {int(statement_timeout * 1000)}"))
 
 
 def _record_version(conn: Connection, name: str, sha: str) -> None:
@@ -202,12 +206,15 @@ def run_migrate(
     allow_destructive: bool,
     advisory_wait: float = 30.0,
     lock_timeout: float = 5.0,
+    statement_timeout: float | None = None,
 ) -> MigrateReport:
     if lock_timeout < 0:
         # same contract as push (executor.with_advisory_lock): budgets
         # are typed floats, never user input, and a negative one must
         # fail before any file or connection work
         raise SqlpushError(f"lock_timeout must be >= 0, got {lock_timeout}")
+    if statement_timeout is not None and statement_timeout < 0:
+        raise SqlpushError(f"statement_timeout must be >= 0, got {statement_timeout}")
     applied: list[str] = []
     skipped: list[str] = []
     blocked: list[str] = []
@@ -255,7 +262,11 @@ def run_migrate(
                     # on this path). Checksum row rides the SAME txn.
                     try:
                         with conn.begin():
-                            _set_local_gucs(conn, lock_timeout=lock_timeout)
+                            _set_local_gucs(
+                                conn,
+                                lock_timeout=lock_timeout,
+                                statement_timeout=statement_timeout,
+                            )
                             conn.exec_driver_sql(raw)
                             _record_version(conn, f.name, checksum(raw))
                         applied.append(f.name)
@@ -275,7 +286,11 @@ def run_migrate(
                 try:
                     if plain:
                         with conn.begin():
-                            _set_local_gucs(conn, lock_timeout=lock_timeout)
+                            _set_local_gucs(
+                                conn,
+                                lock_timeout=lock_timeout,
+                                statement_timeout=statement_timeout,
+                            )
                             for sql in plain:
                                 conn.exec_driver_sql(sql)
                         plain_committed = True
@@ -285,11 +300,13 @@ def run_migrate(
                                 isolation_level="AUTOCOMMIT"
                             )
                             concurrent_stack.callback(concurrent_conn.close)
+                            session_gucs: dict[str, int] = {
+                                "lock_timeout": int(lock_timeout * 1000)
+                            }
+                            if statement_timeout is not None:
+                                session_gucs["statement_timeout"] = int(statement_timeout * 1000)
                             concurrent_stack.enter_context(
-                                _session_gucs(
-                                    concurrent_conn,
-                                    lock_timeout=int(lock_timeout * 1000),
-                                )
+                                _session_gucs(concurrent_conn, **session_gucs)
                             )
                         # statement-per-execute: a multi-statement string
                         # is one implicit server txn (CONCURRENTLY refuses

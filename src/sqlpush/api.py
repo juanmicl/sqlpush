@@ -195,6 +195,7 @@ def migrate(
     allow_destructive=False,
     advisory_wait=30.0,
     lock_timeout=5.0,
+    statement_timeout=None,
 ) -> MigrateReport:
     """Replay annotated-SQL chain files with gates + same-txn bookkeeping.
 
@@ -202,7 +203,10 @@ def migrate(
     via ``_sync_engine_from``; engines created here are disposed).
     ``advisory_wait`` bounds the advisory-lock wait and ``lock_timeout``
     bounds each per-file transaction's lock wait (seconds; 0 = fail
-    immediately — same contract as ``push``). See
+    immediately — same contract as ``push``). ``statement_timeout``
+    (seconds, ``None`` = set nothing) bounds each statement's runtime —
+    ``SET LOCAL`` in per-file transactions, session-level on the
+    CONCURRENTLY autocommit connection. See
     ``chain.migrate.run_migrate`` for the execution contract.
     """
     engine, dispose = _sync_engine_from(target)
@@ -213,6 +217,7 @@ def migrate(
             allow_destructive=allow_destructive,
             advisory_wait=advisory_wait,
             lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
         )
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched
