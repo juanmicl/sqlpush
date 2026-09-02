@@ -8,6 +8,23 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `migrate` now replays CONCURRENTLY-containing chain files per-op on
+  the op-label delimiters: the plain segment runs first in one
+  transaction (chain files can create→index within one file), then
+  concurrent ops run statement-by-statement on a dedicated autocommit
+  connection (session `lock_timeout` matching the per-file txn, RESET +
+  close when the walk ends), and the versions row is written only after
+  every concurrent op succeeds — a failed concurrent op blocks the file
+  (partial failure, no versions row, strict-order stop, the already
+  committed plain segment reported honestly in the notes). Concurrent-
+  free files keep the exact 0.4.2 whole-text single-transaction replay,
+  so existing chains are byte-identically unaffected, and
+  `revision`-generated files (existing-table indexes render
+  CONCURRENTLY since 0.5.0) round-trip through the chain. Known
+  hand-edit cost: a label-less body containing CONCURRENTLY routes to
+  the autocommit lane, and lines starting `--` are stripped from
+  per-op parsing.
+
 - CLI: `push` and `revision` gain `--no-concurrently` (opt out of the
   CONCURRENTLY-by-default index rendering; plain `CREATE INDEX` builds)
   and `push` gains `--statement-timeout` (seconds, unset by default).
