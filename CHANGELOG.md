@@ -6,6 +6,54 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-02
+
+### Added
+
+- Migration chain engine: `revision` / `migrate` / `stamp` verbs (API-first
+  + CLI) over annotated-SQL chain files — plain editable SQL whose
+  `-- sqlpush: revision=NNNN risk=SAFE|RISKY|DESTRUCTIVE` header carries
+  the risk classification (the maximum over the file's ops, by an explicit
+  rank map). Op labels are legal SQL comments, so generated files are
+  directly psql-runnable; parsing is fail-loud: a missing or malformed
+  header refuses the file — never assume-safe (`MigrationFileError`, a
+  `SqlpushError` subclass). `parent=` / `generated=` header info is
+  optional-ignorable.
+- `revision` writes the next `NNNN_slug.sql` from models-vs-reference-DB
+  drift: gap-free numbering (max NNNN + 1), message slug whitelisted to
+  `[a-z0-9_]`, refuses empty drift loudly ("nothing to revise"), refuses
+  to overwrite an existing file, and reports filesystem failures as typed
+  errors. The reference DB is caller-provided — sqlpush stays docker-free.
+- `migrate` replays pending files under the same advisory-lock key
+  derivation as `push`: each file's WHOLE text runs in ONE multi-statement
+  execute inside a per-file transaction (nothing is tokenized —
+  dollar-quoted bodies are safe), and the checksum row (sha256 over
+  newline-normalized bytes) is inserted INSIDE that same transaction, so a
+  crash between apply and bookkeeping cannot crash-loop the file over
+  existing objects. Gates: per-file destructive gate off the header's
+  `risk=`, checksum-mismatch refuse for files edited after apply, and
+  strict ordering — any blocked file stops the chain, nothing later runs.
+  CLI exits 0 clean / 1 blocked or partial.
+- `stamp` adopts an existing DB into the chain (bootstrap seam): registers
+  every parseable file — checksums included — WITHOUT executing any SQL;
+  registered files are reported in `skipped` (stamp never "applies").
+  Caveat: re-running `stamp` over a DB whose chain was applied via
+  `migrate` REFRESHES the recorded checksums — edit-detection for
+  already-applied files is reset; the mismatch-refuse + `--force` shape
+  lands in 0.4.x/0.5.
+- `MigrateReport(applied, skipped, blocked, partial_failure, notes)` — the
+  chain-run report: bare filenames in the lists (exact CI membership
+  checks) with the human-readable reasons in `notes` as `"name: reason"`
+  strings.
+
+### Fixed
+
+- `sqlpush_versions` (the chain engine's own bookkeeping table) is pruned
+  from diffs as a system table, same as `alembic_version`: public-scoped
+  `check` / `plan` / `push` against a migrated DB no longer report
+  `drop_table sqlpush_versions` as destructive drift (cycle-5 review
+  finding C1, fixed pre-publish).
+
 ## [0.3.0] - 2026-09-01
 
 ### Fixed

@@ -17,7 +17,10 @@ from sqlpush.core.classify import classify
 from sqlpush.types import Plan, PlannedOperation
 
 _SYSTEM_SCHEMAS = ("_timescaledb%", "information_schema", "pg_%")
-_SYSTEM_TABLES = ("alembic_version", "spatial_ref_sys")
+# sqlpush_versions: the chain engine's own bookkeeping (migrate/stamp) —
+# same treatment as alembic_version (C1): a public-scoped post-migrate
+# check must be clean, not report its own registry as destructive drift
+_SYSTEM_TABLES = ("alembic_version", "spatial_ref_sys", "sqlpush_versions")
 
 # Leaf op class -> sqlpush op type. Class names follow alembic 1.19.1
 # autogen output as observed in docs/notes/alembic-notes.md and probes:

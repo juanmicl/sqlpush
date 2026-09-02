@@ -83,6 +83,18 @@ class Report:
     duration: float = 0.0
 
 
+@dataclass(frozen=True)
+class MigrateReport:
+    # applied/skipped/blocked carry BARE filenames so callers (tests, CI)
+    # can do exact membership checks; the human-readable why (gate reason,
+    # checksum mismatch, SQL error) lives in `notes` aligned by prefix.
+    applied: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+    blocked: tuple[str, ...] = ()
+    partial_failure: bool = False
+    notes: tuple[str, ...] = ()
+
+
 class SqlpushError(Exception):
     pass
 

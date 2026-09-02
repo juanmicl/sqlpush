@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
 from typing import NoReturn
 
 from sqlalchemy import MetaData
@@ -14,11 +16,18 @@ from sqlalchemy.exc import (
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from sqlpush.apply.executor import apply_plan, with_advisory_lock
+from sqlpush.chain.format import (
+    RISK_RANK,
+    next_revision_id,
+    render_migration_file,
+)
+from sqlpush.chain.migrate import run_migrate, run_stamp
 from sqlpush.core.diff import DiffEngine
 from sqlpush.directives.timescale import hypertable_operations
 from sqlpush.types import (
     CheckResult,
     ConnectFailed,
+    MigrateReport,
     Plan,
     Report,
     SqlpushError,
@@ -114,6 +123,80 @@ def check(metadata, engine, *, schemas=None, exclude=()) -> CheckResult:
         drift=p.drift,
         has_destructive=p.has_destructive,
     )
+
+
+def revision(
+    metadata, ref_engine, *, out_dir="migrations/versions", message=None, schemas=None, exclude=()
+) -> Path:
+    """Generate the next annotated-SQL migration file from models-vs-ref drift.
+
+    The reference DB must sit at the chain head (caller-provided — sqlpush
+    stays docker-free). Empty drift refuses loudly: no empty files.
+    """
+    p = plan(metadata, ref_engine, schemas=schemas, exclude=exclude)
+    if not p.operations:
+        raise SqlpushError("no drift between models and reference DB — nothing to revise")
+    risk = max((op.risk for op in p.operations), key=lambda r: RISK_RANK[r])
+    ops = [(f"[{op.risk.name}] {op.type} {op.table or '?'}", op.sql) for op in p.operations]
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rev_id = next_revision_id(out)
+    slug = re.sub(r"[^a-z0-9_]+", "_", (message or "migration").lower())[:40]
+    path = out / f"{rev_id}_{slug}.sql"
+    if path.exists():
+        # NNNN+slug collision (e.g. same message re-run without the file being
+        # consumed) must be loud, never a silent overwrite of chain history
+        raise SqlpushError(f"refusing to overwrite existing migration file {path}")
+    prev_n = int(rev_id) - 1
+    try:
+        path.write_text(
+            render_migration_file(
+                ops=ops,
+                revision_id=rev_id,
+                risk=risk,
+                message=message,
+                parent=f"{prev_n:04d}" if prev_n >= 1 else None,
+            )
+        )
+    except OSError as exc:
+        raise SqlpushError(f"cannot write migration file {path}: {exc}") from exc
+    return path
+
+
+def migrate(target, *, chain_dir="migrations/versions", allow_destructive=False) -> MigrateReport:
+    """Replay annotated-SQL chain files with gates + same-txn bookkeeping.
+
+    ``target`` is a DSN string, sync ``Engine`` or ``AsyncEngine`` (resolved
+    via ``_sync_engine_from``; engines created here are disposed). See
+    ``chain.migrate.run_migrate`` for the execution contract.
+    """
+    engine, dispose = _sync_engine_from(target)
+    try:
+        return run_migrate(engine, chain_dir=chain_dir, allow_destructive=allow_destructive)
+    except SQLAlchemyError as exc:
+        # MigrationFileError/SqlpushError (typed) pass through untouched
+        _raise_typed(exc)
+    finally:
+        if dispose:
+            engine.dispose()
+
+
+def stamp(target, *, chain_dir="migrations/versions") -> MigrateReport:
+    """Bootstrap: register chain files as applied WITHOUT executing SQL.
+
+    For adopting a DB whose schema already reflects the chain. ``target``
+    resolution and error typing match :func:`migrate`. See
+    ``chain.migrate.run_stamp`` for the report convention.
+    """
+    engine, dispose = _sync_engine_from(target)
+    try:
+        return run_stamp(engine, chain_dir=chain_dir)
+    except SQLAlchemyError as exc:
+        # MigrationFileError/SqlpushError (typed) pass through untouched
+        _raise_typed(exc)
+    finally:
+        if dispose:
+            engine.dispose()
 
 
 def _sync_engine_from(target):
