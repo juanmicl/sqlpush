@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import Column, Enum, Integer, MetaData, Table, text
 
-from sqlpush.api import migrate, plan, revision
+from sqlpush.api import check, migrate, plan, push, revision
 from sqlpush.core.diff import _dedup_enum_types
 from sqlpush.types import PlannedOperation, RiskClass
 
@@ -107,3 +107,25 @@ def test_migrate_shared_enum_succeeds_single_type(enum_db, tmp_path):
         ).scalar()
     assert n == 1  # exactly one type, not one per table
     assert tables == 2
+
+
+@pytest.mark.pg
+def test_push_shared_enum_applies_single_type(enum_db):
+    """S2 apply-path pin: push() must apply the deduped plan cleanly and
+    leave exactly ONE pg_type row — the dedup has to survive the apply
+    path (advisory-lock re-plan included), not just planning/replay."""
+    rep = push(_shared_enum_md(), enum_db)
+    assert rep.applied and not rep.blocked and not rep.partial_failure, rep
+    with enum_db.connect() as conn:
+        n = conn.execute(
+            text("SELECT count(*) FROM pg_type WHERE typname = :n"), {"n": _ENUM_NAME}
+        ).scalar()
+        tables = conn.execute(
+            text(
+                "SELECT count(*) FROM pg_tables "
+                "WHERE schemaname='public' AND tablename IN ('enum_t1','enum_t2')"
+            )
+        ).scalar()
+    assert n == 1  # deduped at apply time, not just in the planned SQL
+    assert tables == 2
+    assert check(_shared_enum_md(), enum_db).clean

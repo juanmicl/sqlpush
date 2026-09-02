@@ -574,3 +574,49 @@ def test_timescale_born_time_index_equals_declared(pg_engine):
     finally:
         with pg_engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS tsborn"))
+
+
+@pytest.mark.timescale
+def test_timescale_born_time_index_different_columns_still_drift(pg_engine):
+    # Boundary of the S1 equal-case pin above: same qualified index name
+    # and owning hypertable, but a DIFFERENT column sequence (m_cols !=
+    # r_cols) must NOT be pruned as birth state — the drop+add pair is
+    # genuine drift and has to surface, exactly the way a reordered or
+    # extra-column declaration does.
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS tsborn2"))
+        conn.execute(
+            text(
+                "CREATE TABLE tsborn2 ("
+                "id integer, ts timestamptz NOT NULL, payload integer, "
+                "PRIMARY KEY (id, ts))"
+            )
+        )
+        conn.execute(text("SELECT create_hypertable('tsborn2', 'ts')"))
+    try:
+        with pg_engine.connect() as conn:
+            idxdef = conn.execute(
+                text("SELECT indexdef FROM pg_indexes WHERE indexname = 'tsborn2_ts_idx'")
+            ).scalar()
+        # sanity: the auto time index exists (on ts, born DESC) — the
+        # metadata declaration below deliberately diverges from it
+        assert idxdef is not None and "DESC" in idxdef, idxdef
+
+        md = MetaData()
+        Table(
+            "tsborn2",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("ts", DateTime(timezone=True), nullable=False, primary_key=True),
+            Column("payload", Integer),
+            # same NAME as the auto time index, different column set
+            Index("tsborn2_ts_idx", "payload"),
+        )
+        plan = DiffEngine().plan(md, pg_engine)
+        assert plan.drift
+        # the reported drift is exactly the index pair — not pruned
+        # (silently equal), not anything else
+        assert sorted(op.type for op in plan.operations) == ["add_index", "drop_index"]
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS tsborn2"))
