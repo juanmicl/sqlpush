@@ -107,6 +107,12 @@ def _timescale_auto_indexes(conn) -> dict[str, set[str]]:
     ``a_b`` dim ``c`` both yield ``a_b_c_idx``) — a str value would
     last-win and leak the other as false drift. Qualified keys carry
     cross-schema hypertables. Empty when the extension is absent.
+
+    Consumed twice in ``_make_include``: DB-only prunes (the reflected
+    auto index with no metadata counterpart) and the S1 both-present
+    sibling (a metadata-declared index with the same qualified name and
+    column sequence compares EQUAL — the default's born-DESC ordering is
+    extension state, not drift).
     """
     installed = conn.execute(
         text("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
@@ -222,6 +228,24 @@ def _make_include_name(schemas: frozenset[str], default_schema: str):
     return include_name
 
 
+def _expr_name(e) -> str | None:
+    """Best-effort column name of an Index expression, order-insensitive.
+
+    Metadata-side expressions may be bare strings (``Index(..., "col")``)
+    or Column objects; reflected-side ones arrive wrapped in
+    ``UnaryExpression`` (the born-DESC/ASC ordering modifier). Unwrap
+    wrapper elements (UnaryExpression/Label carry ``.element``), resolve
+    strings and Columns to their names. Functions fall back to ``.name``
+    — a sufficient equality proxy for the suppression check below.
+    """
+    if isinstance(e, str):
+        return e
+    inner = getattr(e, "element", None)
+    if inner is not None:
+        return _expr_name(inner)
+    return getattr(e, "name", None)
+
+
 def _make_include(
     schemas: frozenset[str],
     default_schema: str,
@@ -241,6 +265,11 @@ def _make_include(
         )
         if schema not in schemas or _is_system_schema(schema):
             return False
+        parent = getattr(obj, "table", None)
+        parent_table = getattr(parent, "name", None)
+        parent_schema = getattr(parent, "schema", None) or default_schema
+        qualified_index = f"{parent_schema}.{name}"
+        qualified_parent = f"{parent_schema}.{parent_table}"
         if reflected and compare_to is None:
             # DB-only object: skip system tables. NB: alembic also
             # auto-excludes its own version table from autogen; the
@@ -251,16 +280,29 @@ def _make_include(
             # state no model declares. Qualified name AND owner set must
             # both match, so a same-named index on another table stays
             # real drift, as does one the metadata actually declares
-            # (that arrives in the both-present branch above).
-            parent = getattr(obj, "table", None)
-            parent_table = getattr(parent, "name", None)
-            parent_schema = getattr(parent, "schema", None) or default_schema
-            qualified_index = f"{parent_schema}.{name}"
-            qualified_parent = f"{parent_schema}.{parent_table}"
+            # (that arrives in the both-present branches below).
             if type_ == "index" and qualified_index in spatial_auto_indexes:
                 return False
             owners = ts_auto_indexes.get(qualified_index, frozenset())
             return not (type_ == "index" and qualified_parent in owners)
+        if type_ == "index" and not reflected and compare_to is not None:
+            # S1 both-present sibling (atlas cycle-6): alembic gates the
+            # drop+add PAIR for a "changed" index behind exactly ONE
+            # include_object call (metadata index, reflected=False,
+            # compare_to=reflected index). TimescaleDB's default time
+            # index is born DESC (pg_index.indoption DESC bit); a
+            # metadata-declared index with the same name, same owning
+            # hypertable and the SAME column sequence is its metadata
+            # stand-in — the sort-order difference is extension-birth
+            # state, not drift. Column names compared ORDER-SENSITIVELY:
+            # a genuinely different declaration (reorder, extra column)
+            # still reports the pair.
+            owners = ts_auto_indexes.get(qualified_index, frozenset())
+            if qualified_parent in owners:
+                m_cols = [_expr_name(e) for e in obj.expressions]
+                r_cols = [_expr_name(e) for e in compare_to.expressions]
+                if m_cols == r_cols:
+                    return False
         return True
 
     return include_object
@@ -314,6 +356,93 @@ def _dedup_embedded_indexes(ops: list[PlannedOperation]) -> list[PlannedOperatio
             and op.sql.strip() in table_renders[op.table]
         )
     ]
+
+
+def _split_statements(sql: str) -> list[str]:
+    """Split a multi-statement op render on top-level ``;`` only.
+
+    Quote-aware: ``;`` inside single-quoted SQL literals (enum labels
+    can carry them) never splits; ``''`` escapes are consumed in pairs.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'":
+            if in_quote and i + 1 < len(sql) and sql[i + 1] == "'":
+                buf.append("''")
+                i += 2
+                continue
+            in_quote = not in_quote
+            buf.append(ch)
+        elif ch == ";" and not in_quote:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    if "".join(buf).strip():
+        parts.append("".join(buf))
+    return parts
+
+
+def _dedup_enum_types(ops: list[PlannedOperation]) -> list[PlannedOperation]:
+    """Emit each native enum's ``CREATE/DROP TYPE`` once across the plan (S2).
+
+    SQLAlchemy's offline render embeds a native enum's DDL inside EVERY
+    table op that references it (per-invoke create/drop memos — unlike
+    metadata-level ``create_all``, which memoizes per metadata), so two
+    tables sharing a Python enum each carry a verbatim copy of the
+    ``CREATE TYPE`` in their add_table render; executing both is a
+    guaranteed DuplicateObject (atlas cycle-6 finding S2 — the enum
+    sibling of F1/F2's embedded-index dedup, but statement-level and
+    cross-table).
+
+    Statement-level: only VERBATIM duplicates (whitespace-normalized)
+    are dropped — later byte-identical copies leave their op, the first
+    copy stays embedded in its original add_table render. A metadata
+    that defines one type name two DIFFERENT ways keeps both statements
+    and still fails loudly at apply time: silent first-win would mask a
+    genuine contradiction.
+    """
+    seen: set[str] = set()
+
+    def _is_type_stmt(norm: str) -> bool:
+        low = norm.lower()
+        return low.startswith(("create type ", "drop type "))
+
+    out: list[PlannedOperation] = []
+    for op in ops:
+        if "type" not in op.sql.lower() or ";" not in op.sql:
+            out.append(op)
+            continue
+        stmts = _split_statements(op.sql)
+        kept: list[str] = []
+        for stmt in stmts:
+            norm = " ".join(stmt.split())
+            if _is_type_stmt(norm):
+                if norm in seen:
+                    continue
+                seen.add(norm)
+            if norm:
+                kept.append(stmt)
+        if not kept:
+            # unreachable for table ops (their CREATE/DROP TABLE always
+            # survives); guard anyway — an empty op.sql is worse than
+            # the duplicate it replaced
+            continue
+        out.append(
+            PlannedOperation(
+                type=op.type,
+                risk=op.risk,
+                sql=";\n\n".join(stmt.strip() for stmt in kept if stmt.strip()),
+                table=op.table,
+                column=op.column,
+            )
+        )
+    return out
 
 
 def _render_op_sql(op, engine: Engine) -> str:
@@ -379,6 +508,7 @@ class DiffEngine:
         for op in _flatten(script.upgrade_ops.ops):
             ops.extend(self._translate(op, engine, exclude))
         ops = _dedup_embedded_indexes(ops)
+        ops = _dedup_enum_types(ops)
         return Plan(operations=tuple(ops))
 
     def _translate(self, op, engine: Engine, exclude: tuple[str, ...]) -> list[PlannedOperation]:
