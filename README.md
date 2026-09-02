@@ -147,7 +147,7 @@ raises when they disagree: the app refuses to boot against a schema it
 does not match, which beats failing on the first query at 3am. The
 schema change itself comes from wherever you put it: `sqlpush push` in
 the deploy pipeline (destructive ops gated), or
-`ensure_schema(..., mode="push")` when you want the API to apply it.
+`aensure_schema(..., mode="push")` when you want the API to apply it.
 
 asyncpg URLs work too: a DSN or `AsyncEngine` spelling
 `postgresql+asyncpg` is translated to the psycopg driver automatically,
