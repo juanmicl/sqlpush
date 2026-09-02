@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-02
+
 ### Added
 
 - Documentation: a chain guide (`docs/the-chain.md`: the three verbs,
