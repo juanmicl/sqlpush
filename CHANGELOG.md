@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-02
+
 ### Added
 
 - `CREATE INDEX` / `CREATE UNIQUE INDEX` on EXISTING tables now render
