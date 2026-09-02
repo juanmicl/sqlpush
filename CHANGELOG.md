@@ -27,6 +27,13 @@ the project follows [Semantic Versioning](https://semver.org/).
   behind another transaction's lock fails fast with a typed error
   instead of queuing indefinitely. Tunable via `--lock-timeout`
   (API: `lock_timeout=`; negative values are rejected up front).
+- The sync facade (`ensure_schema` / `migrate` / `stamp` — everything
+  resolved from a DSN or `AsyncEngine`) now accepts `postgresql+asyncpg`
+  URLs by translating them to the `postgresql+psycopg` driver
+  (host, database, credentials and query options preserved) instead of
+  failing on the async-only driver at connect time. asyncpg is never
+  required to be installed in the sqlpush process; plain psycopg
+  targets are untouched.
 
 ## [0.4.1] - 2026-09-02
 

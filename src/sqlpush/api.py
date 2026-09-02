@@ -223,18 +223,35 @@ def stamp(target, *, chain_dir="migrations/versions", force: bool = False) -> Mi
             engine.dispose()
 
 
+def _translate_asyncpg(url):
+    """Map a ``postgresql+asyncpg`` URL onto the sync psycopg driver.
+
+    An asyncpg URL cannot back a SYNC engine (the dialect is
+    async-only), but psycopg is a runtime dependency — the translated
+    engine actually connects. asyncpg itself is never required in this
+    process. Everything but the driver (host/db/credentials/query
+    options) is preserved via the URL API, no string surgery.
+    """
+    if url.drivername == "postgresql+asyncpg":
+        return url.set(drivername="postgresql+psycopg")
+    return url
+
+
 def _sync_engine_from(target):
     if isinstance(target, AsyncEngine):
         from sqlalchemy import create_engine
         from sqlalchemy.pool import NullPool
 
-        dsn = target.url.render_as_string(hide_password=False)
-        return create_engine(dsn, poolclass=NullPool), True
+        dsn = _translate_asyncpg(target.url)
+        return create_engine(dsn.render_as_string(hide_password=False), poolclass=NullPool), True
     if isinstance(target, str):
         from sqlalchemy import create_engine
+        from sqlalchemy.engine import make_url
         from sqlalchemy.pool import NullPool
 
-        return create_engine(target, poolclass=NullPool), True
+        # make_url raises the same ArgumentError a bad DSN would raise
+        # inside create_engine — error typing downstream is unchanged
+        return create_engine(_translate_asyncpg(make_url(target)), poolclass=NullPool), True
     return target, False
 
 
