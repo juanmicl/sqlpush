@@ -17,9 +17,22 @@ sqlpush check "myapp.models:metadata"     # CI gate: exit 0/2/3
 sqlpush push "myapp.models:metadata"      # apply (destructive gated)
 ```
 
-If you've ever run `Base.metadata.create_all()` in production and known it
-was wrong, then sighed at the migration-script treadmill when you reached
-for alembic: sqlpush is for you.
+If you've run `Base.metadata.create_all()` in production and known it
+was wrong, sqlpush is for you.
+
+## Install
+
+```console
+pip install sqlpush
+```
+
+Or from source:
+
+```console
+git clone https://github.com/juanmicl/sqlpush && cd sqlpush && uv sync
+```
+
+Python 3.10 or newer. PostgreSQL only.
 
 ## Why
 
@@ -35,43 +48,20 @@ language, but for the SQLAlchemy ecosystem (SQLModel included):
 - **Risk-aware by default.** Every operation is classified `safe` /
   `risky` / `destructive`. Destructive ops (drops) are **blocked until
   `--allow-destructive`**: nothing executes at all while any is present.
-- **Drift detection built for CI.** `check` plans once and exits `0` clean /
-  `2` drift / `3` destructive drift, scriptable without parsing output.
-  `--json` emits a stable versioned contract.
-- **Safe under concurrency.** An advisory lock (keyed to the database, not
-  the DSN) coordinates workers: one pusher at a time, losers wait bounded
+- **Drift detection built for CI.** `check` plans once and reports
+  through its exit code, no output parsing; `--json` emits a stable
+  versioned contract.
+- **Safe under concurrency.** An advisory lock coordinates workers: one
+  pusher at a time, losers wait bounded
   and re-verify, so deploy pipelines can race without corrupting anything.
 - **Hypertables without hand-written SQL.** Decorate a model with
   `@hypertable` and the `create_hypertable` directive is planned
   state-aware: idempotent pushes, clean checks, no false drift.
 
+If you know alembic: sqlpush is its autogenerate engine, productized
+into apply and check verbs, with no revision scripts to maintain.
+
 PostgreSQL only, by design.
-
-## When you want files: the chain
-
-The push workflow has no files because most of the time you don't need
-them. When you do, sqlpush has a second workflow built on the same
-diff engine: the chain. `revision` writes the next numbered SQL file
-from your models against a reference DB, `migrate` replays pending
-files with gates and checksums, and `stamp` adopts an existing
-database without executing anything.
-
-The files are plain SQL you can review, edit before first apply, and
-run under `psql`. Schema change and data backfill ship as one file.
-The [chain guide](docs/the-chain.md) covers the format, the gates and
-the workflows.
-
-## Install
-
-```console
-pip install sqlpush
-```
-
-Or from source:
-
-```console
-git clone https://github.com/juanmicl/sqlpush && cd sqlpush && uv sync
-```
 
 ## The 30-second tour
 
@@ -83,14 +73,13 @@ $ export DATABASE_URL="postgresql+psycopg://user:pass@host:5432/db"
 
 $ sqlpush diff "myapp.models:metadata"
 -- safe
-
 CREATE TABLE hero (
-    id SERIAL NOT NULL PRIMARY KEY,
-    name VARCHAR(50) NOT NULL
+    id SERIAL NOT NULL,
+    name VARCHAR(50) NOT NULL,
+    PRIMARY KEY (id)
 );
 
 -- risky
-
 CREATE INDEX ix_hero_name ON hero (name);
 ```
 
@@ -158,12 +147,25 @@ Push in the deploy pipeline, check at boot.
 ## An inherited database
 
 The first `check` against a database with history often reports drift:
-hand-built indexes, audit tables, that column someone added at 2am. If
+hand-built indexes, audit tables, a column someone added by hand. If
 any of the drift looks destructive, `check` exits `3` and `push`
 blocks. That is the tool refusing to silently drop your legacy
 objects. Two escape hatches: `--exclude` accepts objects you choose to
 keep (fnmatch patterns, repeatable), and `--allow-destructive` accepts
 the drops when you really do want them.
+
+## When you want files: the chain
+
+Most changes never need a file. When one does, sqlpush has a second
+workflow built on the same diff engine: the chain. `revision` writes
+the next numbered SQL file from your models against a reference DB,
+`migrate` replays pending files with gates and checksums, and `stamp`
+adopts an existing database without executing anything.
+
+The files are plain SQL you can review, edit before first apply, and
+run under `psql`. Schema change and data backfill ship as one file.
+The [chain guide](docs/the-chain.md) covers the format, the gates and
+the workflows.
 
 ## Exit codes
 
@@ -218,16 +220,14 @@ flowchart LR
     apply --> report["report"]
 ```
 
-- **Diff engine** scopes reflection to your target schemas (default: the
-  session's real `search_path`) and prunes system catalogs (TimescaleDB
-  internals included) before reflection even starts.
+- **Diff engine** scopes reflection to your target schemas and prunes
+  system catalogs (TimescaleDB internals included) before reflection
+  even starts.
 - **Classifier** maps each operation to a risk class; unknown operations
   are `risky`, never silently safe.
-- **Executor** splits the plan: existing-table indexes render
-  `CREATE INDEX CONCURRENTLY` and run one-per-transaction on autocommit
-  (`--no-concurrently` opts out; indexes on tables the same plan creates
-  stay in the atomic transaction), everything else applies in a single
-  atomic transaction with a bounded `lock_timeout`.
+- **Executor** splits the plan: concurrent index builds run one per
+  transaction on autocommit, everything else applies in a single atomic
+  transaction with a bounded `lock_timeout`.
 - **Typed errors**: only `SqlpushError` / `ConnectFailed` /
   `MetadataImportError` escape the API, never raw driver exceptions.
 
@@ -257,6 +257,7 @@ SQLAlchemy models, safely enough to run from CI.
 Guides: [the chain](docs/the-chain.md) (file format, gates, backfills),
 [migrating from alembic](docs/migrating-from-alembic.md), and
 [migrating from migra](docs/migrating-from-migra.md) (deprecated).
+Changes land in the [CHANGELOG](CHANGELOG.md).
 
 ## Design notes
 
@@ -267,7 +268,3 @@ Guides: [the chain](docs/the-chain.md) (file format, gates, backfills),
 - `--json` output is a versioned contract (`"version": 1`) meant for
   tooling; additive changes only within a version (operations now carry
   a `concurrent` boolean).
-
-## Roadmap
-
-- jsonschema-validated `--json` output
