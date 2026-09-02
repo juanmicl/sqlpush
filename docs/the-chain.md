@@ -70,7 +70,8 @@ The structure rides on legal SQL comments, so a chain file runs
 directly under `psql`. There is no sqlpush-specific syntax anywhere in
 the body.
 
-The checksum is sha256 over the whole file, newline-normalized. Files
+The checksum is sha256 over the whole file, newline-normalized, with
+trailing whitespace ignored. Files
 run in lexicographic filename order; the `NNNN_` prefix keeps that
 order meaningful, and `revision` numbers the next file max+1. There is
 no merge graph, just one linear chain. A missing header, an unknown
@@ -82,8 +83,8 @@ refused, never guessed at.
 - The destructive gate reads the header. A file marked
   `risk=DESTRUCTIVE` is blocked until you pass `--allow-destructive`.
 - The checksum gate catches edits. A file that changed after it was
-  applied is refused, with an error naming the file. `stamp --force`
-  is the only override.
+  applied is refused, with an error naming the file. The escape is
+  `stamp --force`, which re-records the new content as applied.
 - Strict order. A blocked file stops the chain; nothing after it runs.
 - One lock for everyone. `migrate` takes the same advisory lock as
   `push`, keyed to the database, so chain workers and pushers take
