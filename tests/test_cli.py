@@ -217,6 +217,64 @@ def test_dsn_env_fallback_and_missing(tmp_path, monkeypatch, hero):
     assert r2.exit_code == 1
 
 
+# --- migrate/stamp verbs (0.4.2 hardening) ---------------------------------
+
+CLI_SAFE_0001 = (
+    "-- sqlpush: revision=0001 risk=SAFE\nCREATE TABLE cli_mt (id integer PRIMARY KEY);\n"
+)
+
+
+@pytest.fixture()
+def cli_chain(pg_engine):
+    def _clean() -> None:
+        with pg_engine.begin() as conn:
+            for t in ("sqlpush_versions", "cli_mt"):
+                conn.execute(text(f"DROP TABLE IF EXISTS {t}"))
+
+    _clean()
+    yield pg_engine
+    _clean()
+
+
+@pytest.mark.pg
+def test_cli_migrate_new_flags_parse_and_succeed(cli_chain, tmp_path):
+    # --advisory-wait / --lock-timeout parse and route through; no
+    # holder + an empty (existing) dir is a legitimate idle run -> 0
+    tmp_path.mkdir(exist_ok=True)
+    r = runner.invoke(
+        app,
+        [
+            "migrate",
+            "--dsn",
+            DSN,
+            "--dir",
+            str(tmp_path),
+            "--advisory-wait",
+            "3",
+            "--lock-timeout",
+            "2",
+        ],
+    )
+    assert r.exit_code == 0
+
+
+@pytest.mark.pg
+def test_cli_stamp_force_on_edited_file(cli_chain, tmp_path):
+    # B4 via the verb: stamp, edit the file, re-stamp without --force ->
+    # typed SqlpushError (exit 1 via main()'s fallback); with --force ->
+    # exit 0 with the checksum refreshed
+    (tmp_path / "0001_init.sql").write_text(CLI_SAFE_0001)
+    r0 = runner.invoke(app, ["stamp", *DSN_ARG, "--dir", str(tmp_path)])
+    assert r0.exit_code == 0
+    (tmp_path / "0001_init.sql").write_text(CLI_SAFE_0001.replace("cli_mt", "cli_mt_ed"))
+    r1 = runner.invoke(app, ["stamp", *DSN_ARG, "--dir", str(tmp_path)])
+    assert r1.exit_code == 1
+    assert isinstance(r1.exception, SqlpushError)
+    assert "0001_init.sql" in str(r1.exception)
+    r2 = runner.invoke(app, ["stamp", *DSN_ARG, "--dir", str(tmp_path), "--force"])
+    assert r2.exit_code == 0
+
+
 # --- unit tests below: api.push monkeypatched, no live PostgreSQL ---
 
 

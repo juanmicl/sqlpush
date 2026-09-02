@@ -139,7 +139,12 @@ def revision(
     risk = max((op.risk for op in p.operations), key=lambda r: RISK_RANK[r])
     ops = [(f"[{op.risk.name}] {op.type} {op.table or '?'}", op.sql) for op in p.operations]
     out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # same typing as the write below: only SqlpushError subclasses
+        # escape the API surface (e.g. out_dir under a file)
+        raise SqlpushError(f"cannot create migrations directory {out}: {exc}") from exc
     rev_id = next_revision_id(out)
     slug = re.sub(r"[^a-z0-9_]+", "_", (message or "migration").lower())[:40]
     path = out / f"{rev_id}_{slug}.sql"
@@ -163,16 +168,32 @@ def revision(
     return path
 
 
-def migrate(target, *, chain_dir="migrations/versions", allow_destructive=False) -> MigrateReport:
+def migrate(
+    target,
+    *,
+    chain_dir="migrations/versions",
+    allow_destructive=False,
+    advisory_wait=30.0,
+    lock_timeout=5.0,
+) -> MigrateReport:
     """Replay annotated-SQL chain files with gates + same-txn bookkeeping.
 
     ``target`` is a DSN string, sync ``Engine`` or ``AsyncEngine`` (resolved
-    via ``_sync_engine_from``; engines created here are disposed). See
+    via ``_sync_engine_from``; engines created here are disposed).
+    ``advisory_wait`` bounds the advisory-lock wait and ``lock_timeout``
+    bounds each per-file transaction's lock wait (seconds; 0 = fail
+    immediately — same contract as ``push``). See
     ``chain.migrate.run_migrate`` for the execution contract.
     """
     engine, dispose = _sync_engine_from(target)
     try:
-        return run_migrate(engine, chain_dir=chain_dir, allow_destructive=allow_destructive)
+        return run_migrate(
+            engine,
+            chain_dir=chain_dir,
+            allow_destructive=allow_destructive,
+            advisory_wait=advisory_wait,
+            lock_timeout=lock_timeout,
+        )
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched
         _raise_typed(exc)
@@ -181,22 +202,39 @@ def migrate(target, *, chain_dir="migrations/versions", allow_destructive=False)
             engine.dispose()
 
 
-def stamp(target, *, chain_dir="migrations/versions") -> MigrateReport:
+def stamp(target, *, chain_dir="migrations/versions", force: bool = False) -> MigrateReport:
     """Bootstrap: register chain files as applied WITHOUT executing SQL.
 
-    For adopting a DB whose schema already reflects the chain. ``target``
-    resolution and error typing match :func:`migrate`. See
-    ``chain.migrate.run_stamp`` for the report convention.
+    For adopting a DB whose schema already reflects the chain. A file
+    already registered with a different checksum (edited after apply)
+    is refused unless ``force`` is set — edit detection survives
+    re-stamping. ``target`` resolution and error typing match
+    :func:`migrate`. See ``chain.migrate.run_stamp`` for the report
+    convention.
     """
     engine, dispose = _sync_engine_from(target)
     try:
-        return run_stamp(engine, chain_dir=chain_dir)
+        return run_stamp(engine, chain_dir=chain_dir, force=force)
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched
         _raise_typed(exc)
     finally:
         if dispose:
             engine.dispose()
+
+
+def _translate_asyncpg(url):
+    """Map a ``postgresql+asyncpg`` URL onto the sync psycopg driver.
+
+    An asyncpg URL cannot back a SYNC engine (the dialect is
+    async-only), but psycopg is a runtime dependency — the translated
+    engine actually connects. asyncpg itself is never required in this
+    process. Everything but the driver (host/db/credentials/query
+    options) is preserved via the URL API, no string surgery.
+    """
+    if url.drivername == "postgresql+asyncpg":
+        return url.set(drivername="postgresql+psycopg")
+    return url
 
 
 def _sync_engine_from(target):
@@ -204,13 +242,16 @@ def _sync_engine_from(target):
         from sqlalchemy import create_engine
         from sqlalchemy.pool import NullPool
 
-        dsn = target.url.render_as_string(hide_password=False)
-        return create_engine(dsn, poolclass=NullPool), True
+        dsn = _translate_asyncpg(target.url)
+        return create_engine(dsn.render_as_string(hide_password=False), poolclass=NullPool), True
     if isinstance(target, str):
         from sqlalchemy import create_engine
+        from sqlalchemy.engine import make_url
         from sqlalchemy.pool import NullPool
 
-        return create_engine(target, poolclass=NullPool), True
+        # make_url raises the same ArgumentError a bad DSN would raise
+        # inside create_engine — error typing downstream is unchanged
+        return create_engine(_translate_asyncpg(make_url(target)), poolclass=NullPool), True
     return target, False
 
 

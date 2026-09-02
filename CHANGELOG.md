@@ -6,6 +6,35 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `migrate` no longer blocks forever on the advisory lock: the chain
+  session's wait is now bounded — `pg_try_advisory_lock` polled every
+  0.5s against a monotonic deadline (default 30s), mirroring `push` —
+  and `migrate` exposes `--advisory-wait` (API: `advisory_wait=`) to
+  tune or zero it. An exhausted budget raises a typed
+  `SqlpushError` instead of hanging on a stuck holder. `stamp` shares
+  the chain session and gets the same bounded default.
+- `stamp` no longer silently refreshes the checksum of a file that was
+  edited after it was applied/stamped: the recorded checksum is read
+  first, and a registered-but-different checksum now refuses with a
+  typed error (first mismatch stops the walk — nothing after it
+  registers) instead of overwriting the registry. `--force` (API:
+  `force=True`) accepts the new content, so the chain's edit-detection
+  integrity survives re-stamping.
+- `migrate` now sets a per-file transaction-scoped `lock_timeout`
+  (default 5s), mirroring `push`: a chain file whose DDL is blocked
+  behind another transaction's lock fails fast with a typed error
+  instead of queuing indefinitely. Tunable via `--lock-timeout`
+  (API: `lock_timeout=`; negative values are rejected up front).
+- The sync facade (`ensure_schema` / `migrate` / `stamp` — everything
+  resolved from a DSN or `AsyncEngine`) now accepts `postgresql+asyncpg`
+  URLs by translating them to the `postgresql+psycopg` driver
+  (host, database, credentials and query options preserved) instead of
+  failing on the async-only driver at connect time. asyncpg is never
+  required to be installed in the sqlpush process; plain psycopg
+  targets are untouched.
+
 ## [0.4.1] - 2026-09-02
 
 ### Added

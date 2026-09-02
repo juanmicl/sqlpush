@@ -4,7 +4,8 @@
 Exit codes: diff always 0; check 0 clean / 2 drift / 3 destructive drift;
 push 0 applied / 1 destructive blocked / 2 error (incl. partial failure);
 revision 0 written / 1 error (empty drift refuses); migrate 0 clean /
-1 blocked or partial failure.
+1 blocked or partial failure; stamp 0 registered / 1 blocked or refused
+(an edited file without --force raises a typed error: exit 1).
 """
 
 from __future__ import annotations
@@ -250,12 +251,20 @@ def revision(
 def migrate(
     dsn: str | None = typer.Option(None),
     allow_destructive: bool = typer.Option(False, "--allow-destructive"),
+    advisory_wait: float = typer.Option(30.0, "--advisory-wait"),
+    lock_timeout: float = typer.Option(5.0, "--lock-timeout"),
     out_dir: DirOpt = Path("migrations/versions"),
 ):
     """Replay pending migration files (gates + checksum bookkeeping)."""
     engine = _engine(dsn)
     try:
-        report = api.migrate(engine, chain_dir=out_dir, allow_destructive=allow_destructive)
+        report = api.migrate(
+            engine,
+            chain_dir=out_dir,
+            allow_destructive=allow_destructive,
+            advisory_wait=advisory_wait,
+            lock_timeout=lock_timeout,
+        )
     finally:
         engine.dispose()
     typer.echo(
@@ -272,12 +281,13 @@ def migrate(
 @app.command()
 def stamp(
     dsn: str | None = typer.Option(None),
+    force: bool = typer.Option(False, "--force"),
     out_dir: DirOpt = Path("migrations/versions"),
 ):
     """Adopt an existing DB: register chain files without executing SQL."""
     engine = _engine(dsn)
     try:
-        report = api.stamp(engine, chain_dir=out_dir)
+        report = api.stamp(engine, chain_dir=out_dir, force=force)
     finally:
         engine.dispose()
     typer.echo(

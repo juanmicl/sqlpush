@@ -239,6 +239,89 @@ def test_ensure_schema_async_engine(pg_engine, md):
         asyncio.run(aengine.dispose())
 
 
+def test_sync_engine_from_translates_asyncpg_dsn(pg_engine):
+    # B2: a postgresql+asyncpg DSN string must yield a WORKING sync
+    # engine on psycopg (runtime dep) — asyncpg is not installed in this
+    # environment, so connecting through it proves the translation.
+    from sqlalchemy.engine import make_url
+
+    from sqlpush.api import _sync_engine_from
+
+    asyncpg_dsn = make_url(pg_engine.url).set(drivername="postgresql+asyncpg")
+    engine, dispose = _sync_engine_from(asyncpg_dsn.render_as_string(hide_password=False))
+    assert dispose
+    try:
+        assert engine.dialect.driver == "psycopg"
+        assert engine.url.drivername == "postgresql+psycopg"
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+    finally:
+        engine.dispose()
+
+
+def test_asyncpg_url_translation_preserves_components(pg_engine):
+    # An AsyncEngine over asyncpg cannot even be constructed here
+    # (create_async_engine imports the driver — verified absent), so the
+    # AsyncEngine-branch translation is pinned at the URL level: driver
+    # swapped, every other component preserved, non-asyncpg passthrough.
+    from sqlalchemy.engine import URL
+
+    from sqlpush.api import _translate_asyncpg
+
+    url = URL.create(
+        "postgresql+asyncpg",
+        username="sqlpush",
+        password="sqlpush",
+        host="localhost",
+        port=5433,
+        database="sqlpush_test",
+        query={"connect_timeout": "10"},
+    )
+    out = _translate_asyncpg(url)
+    assert out.drivername == "postgresql+psycopg"
+    assert (out.username, out.password, out.host, out.port, out.database) == (
+        "sqlpush",
+        "sqlpush",
+        "localhost",
+        5433,
+        "sqlpush_test",
+    )
+    assert dict(out.query) == {"connect_timeout": "10"}
+    plain = URL.create("postgresql+psycopg", host="localhost", database="x")
+    assert _translate_asyncpg(plain) is plain
+
+
+def test_sync_engine_from_plain_psycopg_unchanged(pg_engine):
+    # Non-asyncpg targets keep the exact pre-B2 behavior: str DSN and
+    # plain-psycopg AsyncEngine still resolve to working disposable
+    # psycopg engines, and a sync Engine passes through untouched.
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from sqlpush.api import _sync_engine_from
+
+    dsn = pg_engine.url.render_as_string(hide_password=False)
+    eng, dispose = _sync_engine_from(dsn)
+    assert dispose and eng.url.drivername == "postgresql+psycopg"
+    with eng.connect() as conn:
+        assert conn.execute(text("SELECT 1")).scalar() == 1
+    eng.dispose()
+
+    aeng = create_async_engine(dsn)
+    try:
+        eng2, dispose2 = _sync_engine_from(aeng)
+        assert dispose2 and eng2.url.drivername == "postgresql+psycopg"
+        with eng2.connect() as conn:
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+        eng2.dispose()
+    finally:
+        asyncio.run(aeng.dispose())
+
+    eng3, dispose3 = _sync_engine_from(pg_engine)
+    assert eng3 is pg_engine and not dispose3
+
+
 @pytest.mark.timescale
 def test_push_default_locked_path_applies_hypertable(pg_engine, md_ht):
     # Regression pin: push() defaults to lock=True, whose winner path

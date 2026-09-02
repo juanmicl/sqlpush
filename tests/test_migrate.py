@@ -4,7 +4,9 @@ import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, text
 
 from sqlpush.api import check, migrate
+from sqlpush.apply.executor import advisory_key
 from sqlpush.chain.format import MigrationFileError
+from sqlpush.types import SqlpushError
 
 pytestmark = pytest.mark.pg
 
@@ -121,3 +123,22 @@ def test_versions_table_pruned_from_public_check(migrate_db, tmp_path):
     Table("mt1", md, Column("id", Integer, primary_key=True))  # exactly the migrated state
     result = check(md, migrate_db)  # PUBLIC scope — no schemas=
     assert result.clean, f"sqlpush_versions leaked into the diff: {result.drift}"
+
+
+def test_migrate_advisory_wait_bounded(migrate_db, tmp_path):
+    # B3: the chain session's advisory lock wait is BOUNDED — a second
+    # connection holding the same key plus advisory_wait=0 must raise
+    # SqlpushError promptly instead of blocking on pg_advisory_lock
+    # forever (mirrors with_advisory_lock's wait-exhaustion contract).
+    _write(tmp_path, "0001_init.sql", SAFE_0001)
+    holder = migrate_db.connect()
+    key: int | None = None
+    try:
+        key = advisory_key(holder)
+        holder.execute(text("SELECT pg_advisory_lock(:k)"), {"k": key})
+        with pytest.raises(SqlpushError, match="advisory lock"):
+            migrate(migrate_db, chain_dir=tmp_path, advisory_wait=0)
+    finally:
+        if key is not None:
+            holder.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+        holder.close()
