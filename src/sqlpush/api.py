@@ -71,9 +71,9 @@ class _PlannerWithDirectives(DiffEngine):
         return _build_plan(metadata, engine, schemas, exclude, concurrently)
 
 
-def plan(metadata, engine, *, schemas=None, exclude=()) -> Plan:
+def plan(metadata, engine, *, schemas=None, exclude=(), concurrently: bool = True) -> Plan:
     try:
-        return _build_plan(metadata, engine, schemas, exclude)
+        return _build_plan(metadata, engine, schemas, exclude, concurrently)
     except SQLAlchemyError as exc:
         _raise_typed(exc)
 
@@ -86,9 +86,11 @@ def push(
     allow_destructive=False,
     lock=True,
     lock_timeout=5.0,
+    statement_timeout=None,
     advisory_wait=30.0,
     schemas=None,
     exclude=(),
+    concurrently=True,
 ) -> Report:
     try:
         if lock:
@@ -102,14 +104,21 @@ def push(
                 reverify=_PlannerWithDirectives(_engine),
                 schemas=schemas,
                 exclude=exclude,
+                # THREADING (pinned): the lock winner re-plans via
+                # reverify.plan(...) — both knobs must reach it and the
+                # final apply_plan, or the winner renders differently
+                # than requested
+                concurrently=concurrently,
+                statement_timeout=statement_timeout,
             )
-        p = _build_plan(metadata, engine, schemas, exclude)
+        p = _build_plan(metadata, engine, schemas, exclude, concurrently)
         return apply_plan(
             engine,
             p,
             allow_destructive=allow_destructive,
             safe_only=safe_only,
             lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
         )
     except SQLAlchemyError as exc:
         _raise_typed(exc)
@@ -128,14 +137,23 @@ def check(metadata, engine, *, schemas=None, exclude=()) -> CheckResult:
 
 
 def revision(
-    metadata, ref_engine, *, out_dir="migrations/versions", message=None, schemas=None, exclude=()
+    metadata,
+    ref_engine,
+    *,
+    out_dir="migrations/versions",
+    message=None,
+    schemas=None,
+    exclude=(),
+    concurrently=True,
 ) -> Path:
     """Generate the next annotated-SQL migration file from models-vs-ref drift.
 
     The reference DB must sit at the chain head (caller-provided — sqlpush
     stays docker-free). Empty drift refuses loudly: no empty files.
+    ``concurrently`` follows :func:`plan` (default True: existing-table
+    indexes render CONCURRENTLY in the generated file).
     """
-    p = plan(metadata, ref_engine, schemas=schemas, exclude=exclude)
+    p = plan(metadata, ref_engine, schemas=schemas, exclude=exclude, concurrently=concurrently)
     if not p.operations:
         raise SqlpushError("no drift between models and reference DB — nothing to revise")
     risk = max((op.risk for op in p.operations), key=lambda r: RISK_RANK[r])

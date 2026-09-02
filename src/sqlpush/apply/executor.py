@@ -192,6 +192,8 @@ def with_advisory_lock(
     reverify: DiffEngine | None = None,
     schemas: Sequence[str] | None = None,
     exclude: Sequence[str] = (),
+    concurrently: bool = True,
+    statement_timeout: float | None = None,
 ) -> Report:
     """Winner migrates; losers block (bounded), then re-verify.
 
@@ -199,7 +201,9 @@ def with_advisory_lock(
     ``time.monotonic()`` deadline; once the lock is acquired the winner
     path re-plans (covering the case where the previous winner died
     mid-push). Raises :class:`SqlpushError` if the wait budget is
-    exhausted.
+    exhausted. ``concurrently`` and ``statement_timeout`` thread into
+    BOTH the winner's re-plan and its apply — the re-plan must render
+    exactly what the caller asked for.
     """
     if reverify is None:
         raise SqlpushError(
@@ -225,7 +229,13 @@ def with_advisory_lock(
         # (killed mid-push = lock silently released)
         conn.rollback()
         try:
-            plan = reverify.plan(metadata, engine, schemas=schemas, exclude=exclude)
+            plan = reverify.plan(
+                metadata,
+                engine,
+                schemas=schemas,
+                exclude=exclude,
+                concurrently=concurrently,
+            )
             if not plan.drift:
                 return Report()
             return apply_plan(
@@ -234,6 +244,7 @@ def with_advisory_lock(
                 allow_destructive=allow_destructive,
                 safe_only=safe_only,
                 lock_timeout=timeout,
+                statement_timeout=statement_timeout,
             )
         finally:
             # best-effort unlock: a secondary failure here (e.g. the

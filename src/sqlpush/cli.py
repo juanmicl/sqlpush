@@ -148,6 +148,8 @@ def push(
     no_lock: bool = typer.Option(False, "--no-lock"),
     lock_timeout: float = typer.Option(5.0, "--lock-timeout"),
     advisory_wait: float = typer.Option(30.0, "--advisory-wait"),
+    no_concurrently: bool = typer.Option(False, "--no-concurrently"),
+    statement_timeout: float | None = typer.Option(None, "--statement-timeout"),
     verbose: bool = typer.Option(False, "--verbose"),
     quiet: bool = typer.Option(False, "--quiet"),
     schema: SchemaOpt = None,
@@ -165,6 +167,8 @@ def push(
                 lock=not no_lock,
                 lock_timeout=lock_timeout,
                 advisory_wait=advisory_wait,
+                concurrently=not no_concurrently,
+                statement_timeout=statement_timeout,
                 schemas=schema,
                 exclude=exclude or (),
             )
@@ -223,6 +227,7 @@ def revision(
     ref_dsn: str = typer.Option(..., "--ref-dsn"),
     message: str | None = typer.Option(None, "--message", "-m"),
     out_dir: DirOpt = Path("migrations/versions"),
+    no_concurrently: bool = typer.Option(False, "--no-concurrently"),
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
 ):
@@ -238,6 +243,7 @@ def revision(
             engine,
             out_dir=out_dir,
             message=message,
+            concurrently=not no_concurrently,
             schemas=schema,
             exclude=exclude or (),
         )

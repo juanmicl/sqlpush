@@ -8,6 +8,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- CLI: `push` and `revision` gain `--no-concurrently` (opt out of the
+  CONCURRENTLY-by-default index rendering; plain `CREATE INDEX` builds)
+  and `push` gains `--statement-timeout` (seconds, unset by default).
+  Python API: `plan` / `push` / `revision` accept `concurrently=True`
+  and `push` accepts `statement_timeout=None`. Both thread through the
+  advisory-lock winner path: the lock winner's re-plan renders exactly
+  what the caller requested.
 - `push` can bound each statement's runtime with a `statement_timeout`
   (API: `push(..., statement_timeout=...)`, seconds, `None` = set
   nothing): the transactional segment applies it as `SET LOCAL

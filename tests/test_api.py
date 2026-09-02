@@ -208,6 +208,59 @@ def test_push_existing_table_index_concurrent_end_to_end(pg_engine, md_conc_push
     assert has_col is not None  # txn segment still ran
 
 
+def test_concurrently_opt_out_end_to_end(pg_engine, md_conc_push, monkeypatch):
+    # A3 + the pinned threading hazard: push with concurrently=False
+    # through the DEFAULT locked path. The lock winner re-plans via
+    # reverify.plan(...), so `concurrently` MUST reach that re-plan and
+    # `statement_timeout` the final apply_plan — otherwise the winner
+    # renders differently than requested. Spies pin the kwarg threading;
+    # the captured plan and the DB pin the plain render applied.
+    import sqlpush.api as api_mod
+    from sqlpush.apply import executor as executor_mod
+    from sqlpush.core.diff import DiffEngine
+
+    plan_kwargs: list[dict] = []
+    plans: list[Plan] = []
+
+    class SpyEngine(DiffEngine):
+        def plan(self, metadata, engine, **kw):
+            plan_kwargs.append(kw)
+            p = super().plan(metadata, engine, **kw)
+            plans.append(p)
+            return p
+
+    apply_kwargs: list[dict] = []
+    real_apply = executor_mod.apply_plan
+
+    def spy_apply(engine, plan, **kw):
+        apply_kwargs.append(kw)
+        return real_apply(engine, plan, **kw)
+
+    monkeypatch.setattr(api_mod, "_engine", SpyEngine())
+    monkeypatch.setattr(executor_mod, "apply_plan", spy_apply)
+
+    rep = push(md_conc_push, pg_engine, concurrently=False, statement_timeout=4.0)
+
+    # the lock winner's re-plan was asked for — and rendered — plain
+    assert len(plan_kwargs) == 1  # exactly the winner-path re-plan
+    assert plan_kwargs[0]["concurrently"] is False
+    idx = [op for op in plans[0].operations if op.type == "add_index"]
+    assert len(idx) == 1
+    assert idx[0].sql.startswith("CREATE INDEX ")
+    assert "CONCURRENTLY" not in idx[0].sql
+    assert idx[0].concurrent is False
+    # statement_timeout threaded through with_advisory_lock to apply_plan
+    assert apply_kwargs and apply_kwargs[0]["statement_timeout"] == 4.0
+    # applied end-to-end, plain (transactional segment), schema clean
+    assert [a.status for a in rep.applied] == ["applied"]
+    with pg_engine.connect() as conn:
+        ok = conn.execute(
+            text("SELECT 1 FROM pg_indexes WHERE indexname = 'ix_conc_push_email'")
+        ).scalar()
+    assert ok is not None
+    assert check(md_conc_push, pg_engine).clean
+
+
 @pytest.fixture()
 def md_ht_schema():
     # F3a (push fire-test): @hypertable on a NON-default-schema table.
