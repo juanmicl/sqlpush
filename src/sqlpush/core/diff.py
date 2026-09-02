@@ -316,6 +316,93 @@ def _dedup_embedded_indexes(ops: list[PlannedOperation]) -> list[PlannedOperatio
     ]
 
 
+def _split_statements(sql: str) -> list[str]:
+    """Split a multi-statement op render on top-level ``;`` only.
+
+    Quote-aware: ``;`` inside single-quoted SQL literals (enum labels
+    can carry them) never splits; ``''`` escapes are consumed in pairs.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    in_quote = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "'":
+            if in_quote and i + 1 < len(sql) and sql[i + 1] == "'":
+                buf.append("''")
+                i += 2
+                continue
+            in_quote = not in_quote
+            buf.append(ch)
+        elif ch == ";" and not in_quote:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    if "".join(buf).strip():
+        parts.append("".join(buf))
+    return parts
+
+
+def _dedup_enum_types(ops: list[PlannedOperation]) -> list[PlannedOperation]:
+    """Emit each native enum's ``CREATE/DROP TYPE`` once across the plan (S2).
+
+    SQLAlchemy's offline render embeds a native enum's DDL inside EVERY
+    table op that references it (per-invoke create/drop memos — unlike
+    metadata-level ``create_all``, which memoizes per metadata), so two
+    tables sharing a Python enum each carry a verbatim copy of the
+    ``CREATE TYPE`` in their add_table render; executing both is a
+    guaranteed DuplicateObject (atlas cycle-6 finding S2 — the enum
+    sibling of F1/F2's embedded-index dedup, but statement-level and
+    cross-table).
+
+    Statement-level: only VERBATIM duplicates (whitespace-normalized)
+    are dropped — later byte-identical copies leave their op, the first
+    copy stays embedded in its original add_table render. A metadata
+    that defines one type name two DIFFERENT ways keeps both statements
+    and still fails loudly at apply time: silent first-win would mask a
+    genuine contradiction.
+    """
+    seen: set[str] = set()
+
+    def _is_type_stmt(norm: str) -> bool:
+        low = norm.lower()
+        return low.startswith(("create type ", "drop type "))
+
+    out: list[PlannedOperation] = []
+    for op in ops:
+        if "type" not in op.sql.lower() or ";" not in op.sql:
+            out.append(op)
+            continue
+        stmts = _split_statements(op.sql)
+        kept: list[str] = []
+        for stmt in stmts:
+            norm = " ".join(stmt.split())
+            if _is_type_stmt(norm):
+                if norm in seen:
+                    continue
+                seen.add(norm)
+            if norm:
+                kept.append(stmt)
+        if not kept:
+            # unreachable for table ops (their CREATE/DROP TABLE always
+            # survives); guard anyway — an empty op.sql is worse than
+            # the duplicate it replaced
+            continue
+        out.append(
+            PlannedOperation(
+                type=op.type,
+                risk=op.risk,
+                sql=";\n\n".join(stmt.strip() for stmt in kept if stmt.strip()),
+                table=op.table,
+                column=op.column,
+            )
+        )
+    return out
+
+
 def _render_op_sql(op, engine: Engine) -> str:
     buf = io.StringIO()
     offline = MigrationContext.configure(
@@ -379,6 +466,7 @@ class DiffEngine:
         for op in _flatten(script.upgrade_ops.ops):
             ops.extend(self._translate(op, engine, exclude))
         ops = _dedup_embedded_indexes(ops)
+        ops = _dedup_enum_types(ops)
         return Plan(operations=tuple(ops))
 
     def _translate(self, op, engine: Engine, exclude: tuple[str, ...]) -> list[PlannedOperation]:
