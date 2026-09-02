@@ -107,6 +107,12 @@ def _timescale_auto_indexes(conn) -> dict[str, set[str]]:
     ``a_b`` dim ``c`` both yield ``a_b_c_idx``) — a str value would
     last-win and leak the other as false drift. Qualified keys carry
     cross-schema hypertables. Empty when the extension is absent.
+
+    Consumed twice in ``_make_include``: DB-only prunes (the reflected
+    auto index with no metadata counterpart) and the S1 both-present
+    sibling (a metadata-declared index with the same qualified name and
+    column sequence compares EQUAL — the default's born-DESC ordering is
+    extension state, not drift).
     """
     installed = conn.execute(
         text("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
@@ -222,6 +228,24 @@ def _make_include_name(schemas: frozenset[str], default_schema: str):
     return include_name
 
 
+def _expr_name(e) -> str | None:
+    """Best-effort column name of an Index expression, order-insensitive.
+
+    Metadata-side expressions may be bare strings (``Index(..., "col")``)
+    or Column objects; reflected-side ones arrive wrapped in
+    ``UnaryExpression`` (the born-DESC/ASC ordering modifier). Unwrap
+    wrapper elements (UnaryExpression/Label carry ``.element``), resolve
+    strings and Columns to their names. Functions fall back to ``.name``
+    — a sufficient equality proxy for the suppression check below.
+    """
+    if isinstance(e, str):
+        return e
+    inner = getattr(e, "element", None)
+    if inner is not None:
+        return _expr_name(inner)
+    return getattr(e, "name", None)
+
+
 def _make_include(
     schemas: frozenset[str],
     default_schema: str,
@@ -241,6 +265,11 @@ def _make_include(
         )
         if schema not in schemas or _is_system_schema(schema):
             return False
+        parent = getattr(obj, "table", None)
+        parent_table = getattr(parent, "name", None)
+        parent_schema = getattr(parent, "schema", None) or default_schema
+        qualified_index = f"{parent_schema}.{name}"
+        qualified_parent = f"{parent_schema}.{parent_table}"
         if reflected and compare_to is None:
             # DB-only object: skip system tables. NB: alembic also
             # auto-excludes its own version table from autogen; the
@@ -251,16 +280,29 @@ def _make_include(
             # state no model declares. Qualified name AND owner set must
             # both match, so a same-named index on another table stays
             # real drift, as does one the metadata actually declares
-            # (that arrives in the both-present branch above).
-            parent = getattr(obj, "table", None)
-            parent_table = getattr(parent, "name", None)
-            parent_schema = getattr(parent, "schema", None) or default_schema
-            qualified_index = f"{parent_schema}.{name}"
-            qualified_parent = f"{parent_schema}.{parent_table}"
+            # (that arrives in the both-present branches below).
             if type_ == "index" and qualified_index in spatial_auto_indexes:
                 return False
             owners = ts_auto_indexes.get(qualified_index, frozenset())
             return not (type_ == "index" and qualified_parent in owners)
+        if type_ == "index" and not reflected and compare_to is not None:
+            # S1 both-present sibling (atlas cycle-6): alembic gates the
+            # drop+add PAIR for a "changed" index behind exactly ONE
+            # include_object call (metadata index, reflected=False,
+            # compare_to=reflected index). TimescaleDB's default time
+            # index is born DESC (pg_index.indoption DESC bit); a
+            # metadata-declared index with the same name, same owning
+            # hypertable and the SAME column sequence is its metadata
+            # stand-in — the sort-order difference is extension-birth
+            # state, not drift. Column names compared ORDER-SENSITIVELY:
+            # a genuinely different declaration (reorder, extra column)
+            # still reports the pair.
+            owners = ts_auto_indexes.get(qualified_index, frozenset())
+            if qualified_parent in owners:
+                m_cols = [_expr_name(e) for e in obj.expressions]
+                r_cols = [_expr_name(e) for e in compare_to.expressions]
+                if m_cols == r_cols:
+                    return False
         return True
 
     return include_object

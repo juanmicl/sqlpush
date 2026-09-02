@@ -534,3 +534,43 @@ def test_instrumented_index_renders_once_schema_qual(other_schema):
         op.type == "add_table" and "CREATE TABLE other.geotbl" in op.sql for op in plan.operations
     )
     assert not any(op.type == "add_index" and op.table == "geotbl" for op in plan.operations)
+
+
+@pytest.mark.timescale
+def test_timescale_born_time_index_equals_declared(pg_engine):
+    # S1 (atlas cycle-6): dev-era create_hypertable defaults are born DESC
+    # (pg_index.indoption DESC bit; column_sorting in reflection). A
+    # metadata index declared with the SAME name and SAME column set but
+    # plain ASC must compare EQUAL — the pair (drop+add) was pure
+    # timescale-birth noise, the both-present sibling of the DB-only
+    # auto-index prune.
+    from sqlalchemy import Index
+
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS tsborn"))
+        conn.execute(
+            text("CREATE TABLE tsborn (id integer, ts timestamptz NOT NULL, PRIMARY KEY (id, ts))")
+        )
+        conn.execute(text("SELECT create_hypertable('tsborn', 'ts')"))
+    try:
+        with pg_engine.connect() as conn:
+            idxdef = conn.execute(
+                text("SELECT indexdef FROM pg_indexes WHERE indexname = 'tsborn_ts_idx'")
+            ).scalar()
+        # sanity: the birth property this test pins — timescale's default
+        # time index carries DESC ordering
+        assert idxdef is not None and "DESC" in idxdef, idxdef
+
+        md = MetaData()
+        Table(
+            "tsborn",
+            md,
+            Column("id", Integer, primary_key=True),
+            Column("ts", DateTime(timezone=True), nullable=False, primary_key=True),
+            Index("tsborn_ts_idx", "ts"),  # declared plain (ASC)
+        )
+        plan = DiffEngine().plan(md, pg_engine)
+        assert plan.drift is False, [f"{op.type} {op.table}: {op.sql}" for op in plan.operations]
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS tsborn"))
