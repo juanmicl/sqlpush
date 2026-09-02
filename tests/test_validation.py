@@ -11,9 +11,9 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from sqlpush import api
-from sqlpush.apply.executor import with_advisory_lock
+from sqlpush.apply.executor import apply_plan, with_advisory_lock
 from sqlpush.core.diff import DiffEngine
-from sqlpush.types import ConnectFailed, RiskClass, SqlpushError
+from sqlpush.types import ConnectFailed, Plan, RiskClass, SqlpushError
 
 UNREACHABLE = "postgresql+psycopg://u:p@127.0.0.1:5999/x?connect_timeout=2"
 
@@ -84,6 +84,24 @@ def test_with_advisory_lock_rejects_negative_budgets(kwargs):
 def test_migrate_rejects_negative_budgets(kwargs, tmp_path):
     with pytest.raises(SqlpushError, match=">= 0"):
         api.migrate(_lazy_engine(), chain_dir=tmp_path, **kwargs)
+
+
+# --- B12 (0.5.0): migrate statement_timeout validation (validation runs
+# before any connection attempt, so DB-free like I4) ------------------------
+
+
+def test_statement_timeout_negative_rejected(tmp_path):
+    with pytest.raises(SqlpushError, match=">= 0"):
+        api.migrate(_lazy_engine(), chain_dir=tmp_path, statement_timeout=-1)
+
+
+# --- B12 (0.5.0): push statement_timeout budget validation (validation
+# runs before any connection attempt, so DB-free like I4/B3) ---------------
+
+
+def test_apply_plan_rejects_negative_statement_timeout():
+    with pytest.raises(SqlpushError, match=">= 0"):
+        apply_plan(_lazy_engine(), Plan(), statement_timeout=-1)
 
 
 # --- I6: AlterColumnOp disambiguation (sentinel semantics per

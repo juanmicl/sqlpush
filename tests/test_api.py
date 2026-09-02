@@ -16,6 +16,8 @@ from sqlalchemy import (
 import sqlpush
 from sqlpush import check, ensure_schema, plan, push
 from sqlpush.annotations import hypertable
+from sqlpush.apply.executor import apply_plan
+from sqlpush.types import Plan, PlannedOperation, RiskClass
 
 pytestmark = pytest.mark.pg
 
@@ -123,6 +125,140 @@ def test_push_declared_index_applies_once(pg_engine, md_indexed):
         ).scalar()
     assert n == 1
     assert check(md_indexed, pg_engine).clean
+
+
+@pytest.fixture()
+def md_conc_push(pg_engine):
+    # §5.1: an EXISTING table gaining a declared index — the shape the
+    # CONCURRENTLY-by-default rendering targets
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS conc_push"))
+        conn.execute(text("CREATE TABLE conc_push (id INTEGER PRIMARY KEY, email VARCHAR(50))"))
+    md = MetaData()
+    Table(
+        "conc_push",
+        md,
+        Column("id", Integer, primary_key=True),
+        Column("email", String(50)),
+        Index("ix_conc_push_email", "email"),
+    )
+    yield md
+    with pg_engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS conc_push"))
+
+
+def test_push_existing_table_index_concurrent_end_to_end(pg_engine, md_conc_push):
+    # Live push through the DEFAULT locked path: the index op is planned
+    # CONCURRENTLY (flag + SQL), applied on the autocommit segment, lands
+    # VALID in pg_indexes, and the push is honest about outcomes — a
+    # failing concurrent op is a partial failure while the transactional
+    # segment still applies (mirror of test_executor.py's split test,
+    # with the injected-plan shape: flag AND SQL both set).
+    rep = push(md_conc_push, pg_engine)
+    idx_applied = [a for a in rep.applied if a.type == "add_index"]
+    assert idx_applied and all(a.status == "applied" for a in idx_applied)
+    with pg_engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT x.indisvalid FROM pg_indexes i "
+                "JOIN pg_class c ON c.relname = i.indexname "
+                "JOIN pg_index x ON x.indexrelid = c.oid "
+                "WHERE i.schemaname = 'public' AND i.indexname = 'ix_conc_push_email'"
+            )
+        ).first()
+    assert row is not None and row[0] is True  # exists AND not INVALID
+    assert check(md_conc_push, pg_engine).clean
+
+    plan = Plan(
+        operations=(
+            PlannedOperation(
+                type="add_index",
+                risk=RiskClass.RISKY,
+                sql="CREATE INDEX CONCURRENTLY ix_cok ON conc_push (id)",
+                table="conc_push",
+                concurrent=True,
+            ),
+            PlannedOperation(
+                type="add_index",
+                risk=RiskClass.RISKY,
+                sql="CREATE INDEX CONCURRENTLY ix_cbad ON conc_push (nope)",
+                table="conc_push",
+                concurrent=True,
+            ),
+            PlannedOperation(
+                type="add_column",
+                risk=RiskClass.SAFE,
+                sql="ALTER TABLE conc_push ADD COLUMN a2 INT",
+                table="conc_push",
+                column="a2",
+            ),
+        )
+    )
+    report = apply_plan(pg_engine, plan)
+    assert report.partial_failure is True
+    statuses = {a.type + a.status for a in report.applied}
+    assert any("failed" in s for s in statuses)
+    with pg_engine.connect() as conn:
+        has_col = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = 'conc_push' AND column_name = 'a2'"
+            )
+        ).first()
+    assert has_col is not None  # txn segment still ran
+
+
+def test_concurrently_opt_out_end_to_end(pg_engine, md_conc_push, monkeypatch):
+    # A3 + the pinned threading hazard: push with concurrently=False
+    # through the DEFAULT locked path. The lock winner re-plans via
+    # reverify.plan(...), so `concurrently` MUST reach that re-plan and
+    # `statement_timeout` the final apply_plan — otherwise the winner
+    # renders differently than requested. Spies pin the kwarg threading;
+    # the captured plan and the DB pin the plain render applied.
+    import sqlpush.api as api_mod
+    from sqlpush.apply import executor as executor_mod
+    from sqlpush.core.diff import DiffEngine
+
+    plan_kwargs: list[dict] = []
+    plans: list[Plan] = []
+
+    class SpyEngine(DiffEngine):
+        def plan(self, metadata, engine, **kw):
+            plan_kwargs.append(kw)
+            p = super().plan(metadata, engine, **kw)
+            plans.append(p)
+            return p
+
+    apply_kwargs: list[dict] = []
+    real_apply = executor_mod.apply_plan
+
+    def spy_apply(engine, plan, **kw):
+        apply_kwargs.append(kw)
+        return real_apply(engine, plan, **kw)
+
+    monkeypatch.setattr(api_mod, "_engine", SpyEngine())
+    monkeypatch.setattr(executor_mod, "apply_plan", spy_apply)
+
+    rep = push(md_conc_push, pg_engine, concurrently=False, statement_timeout=4.0)
+
+    # the lock winner's re-plan was asked for — and rendered — plain
+    assert len(plan_kwargs) == 1  # exactly the winner-path re-plan
+    assert plan_kwargs[0]["concurrently"] is False
+    idx = [op for op in plans[0].operations if op.type == "add_index"]
+    assert len(idx) == 1
+    assert idx[0].sql.startswith("CREATE INDEX ")
+    assert "CONCURRENTLY" not in idx[0].sql
+    assert idx[0].concurrent is False
+    # statement_timeout threaded through with_advisory_lock to apply_plan
+    assert apply_kwargs and apply_kwargs[0]["statement_timeout"] == 4.0
+    # applied end-to-end, plain (transactional segment), schema clean
+    assert [a.status for a in rep.applied] == ["applied"]
+    with pg_engine.connect() as conn:
+        ok = conn.execute(
+            text("SELECT 1 FROM pg_indexes WHERE indexname = 'ix_conc_push_email'")
+        ).scalar()
+    assert ok is not None
+    assert check(md_conc_push, pg_engine).clean
 
 
 @pytest.fixture()

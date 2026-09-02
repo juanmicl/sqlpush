@@ -48,8 +48,10 @@ def _raise_typed(exc: SQLAlchemyError) -> NoReturn:
     raise SqlpushError(f"database error: {exc}") from exc
 
 
-def _build_plan(metadata: MetaData, engine: Engine, schemas, exclude) -> Plan:
-    p = _engine.plan(metadata, engine, schemas=schemas, exclude=exclude)
+def _build_plan(
+    metadata: MetaData, engine: Engine, schemas, exclude, concurrently: bool = True
+) -> Plan:
+    p = _engine.plan(metadata, engine, schemas=schemas, exclude=exclude, concurrently=concurrently)
     return Plan(operations=p.operations + tuple(hypertable_operations(metadata, engine)))
 
 
@@ -65,13 +67,13 @@ class _PlannerWithDirectives(DiffEngine):
     def __init__(self, engine: DiffEngine) -> None:
         self._engine = engine
 
-    def plan(self, metadata, engine, *, schemas=None, exclude=()) -> Plan:
-        return _build_plan(metadata, engine, schemas, exclude)
+    def plan(self, metadata, engine, *, schemas=None, exclude=(), concurrently=True) -> Plan:
+        return _build_plan(metadata, engine, schemas, exclude, concurrently)
 
 
-def plan(metadata, engine, *, schemas=None, exclude=()) -> Plan:
+def plan(metadata, engine, *, schemas=None, exclude=(), concurrently: bool = True) -> Plan:
     try:
-        return _build_plan(metadata, engine, schemas, exclude)
+        return _build_plan(metadata, engine, schemas, exclude, concurrently)
     except SQLAlchemyError as exc:
         _raise_typed(exc)
 
@@ -84,9 +86,11 @@ def push(
     allow_destructive=False,
     lock=True,
     lock_timeout=5.0,
+    statement_timeout=None,
     advisory_wait=30.0,
     schemas=None,
     exclude=(),
+    concurrently=True,
 ) -> Report:
     try:
         if lock:
@@ -100,14 +104,21 @@ def push(
                 reverify=_PlannerWithDirectives(_engine),
                 schemas=schemas,
                 exclude=exclude,
+                # THREADING (pinned): the lock winner re-plans via
+                # reverify.plan(...) — both knobs must reach it and the
+                # final apply_plan, or the winner renders differently
+                # than requested
+                concurrently=concurrently,
+                statement_timeout=statement_timeout,
             )
-        p = _build_plan(metadata, engine, schemas, exclude)
+        p = _build_plan(metadata, engine, schemas, exclude, concurrently)
         return apply_plan(
             engine,
             p,
             allow_destructive=allow_destructive,
             safe_only=safe_only,
             lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
         )
     except SQLAlchemyError as exc:
         _raise_typed(exc)
@@ -126,14 +137,23 @@ def check(metadata, engine, *, schemas=None, exclude=()) -> CheckResult:
 
 
 def revision(
-    metadata, ref_engine, *, out_dir="migrations/versions", message=None, schemas=None, exclude=()
+    metadata,
+    ref_engine,
+    *,
+    out_dir="migrations/versions",
+    message=None,
+    schemas=None,
+    exclude=(),
+    concurrently=True,
 ) -> Path:
     """Generate the next annotated-SQL migration file from models-vs-ref drift.
 
     The reference DB must sit at the chain head (caller-provided — sqlpush
     stays docker-free). Empty drift refuses loudly: no empty files.
+    ``concurrently`` follows :func:`plan` (default True: existing-table
+    indexes render CONCURRENTLY in the generated file).
     """
-    p = plan(metadata, ref_engine, schemas=schemas, exclude=exclude)
+    p = plan(metadata, ref_engine, schemas=schemas, exclude=exclude, concurrently=concurrently)
     if not p.operations:
         raise SqlpushError("no drift between models and reference DB — nothing to revise")
     risk = max((op.risk for op in p.operations), key=lambda r: RISK_RANK[r])
@@ -175,6 +195,7 @@ def migrate(
     allow_destructive=False,
     advisory_wait=30.0,
     lock_timeout=5.0,
+    statement_timeout=None,
 ) -> MigrateReport:
     """Replay annotated-SQL chain files with gates + same-txn bookkeeping.
 
@@ -182,7 +203,10 @@ def migrate(
     via ``_sync_engine_from``; engines created here are disposed).
     ``advisory_wait`` bounds the advisory-lock wait and ``lock_timeout``
     bounds each per-file transaction's lock wait (seconds; 0 = fail
-    immediately — same contract as ``push``). See
+    immediately — same contract as ``push``). ``statement_timeout``
+    (seconds, ``None`` = set nothing) bounds each statement's runtime —
+    ``SET LOCAL`` in per-file transactions, session-level on the
+    CONCURRENTLY autocommit connection. See
     ``chain.migrate.run_migrate`` for the execution contract.
     """
     engine, dispose = _sync_engine_from(target)
@@ -193,6 +217,7 @@ def migrate(
             allow_destructive=allow_destructive,
             advisory_wait=advisory_wait,
             lock_timeout=lock_timeout,
+            statement_timeout=statement_timeout,
         )
     except SQLAlchemyError as exc:
         # MigrationFileError/SqlpushError (typed) pass through untouched

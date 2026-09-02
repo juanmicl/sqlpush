@@ -35,8 +35,19 @@ def test_json_contract_v1_shape():
     assert d["version"] == 1
     assert d["drift"] is True
     op = d["operations"][0]
-    assert set(op) == {"type", "risk", "table", "column", "sql"}
+    assert set(op) == {"type", "risk", "table", "column", "sql", "concurrent"}
     assert op["risk"] == "safe"
+    assert op["concurrent"] is False
+
+
+def test_planned_operation_concurrent_defaults_false():
+    # additive field: every pre-existing construction site (tests,
+    # hand-built plans) keeps working unchanged; injection flips it
+    # via dataclasses.replace on exactly the ops it rewrites
+    op = PlannedOperation(
+        type="add_index", risk=RiskClass.RISKY, sql="CREATE INDEX ix ON t (c)", table="t"
+    )
+    assert op.concurrent is False
 
 
 def test_exception_hierarchy():

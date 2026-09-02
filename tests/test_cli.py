@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, Table, text
@@ -273,6 +274,60 @@ def test_cli_stamp_force_on_edited_file(cli_chain, tmp_path):
     assert "0001_init.sql" in str(r1.exception)
     r2 = runner.invoke(app, ["stamp", *DSN_ARG, "--dir", str(tmp_path), "--force"])
     assert r2.exit_code == 0
+
+
+# --- 0.5.0 flags: --no-concurrently / --statement-timeout -------------------
+
+
+def test_push_flags_route_to_api(tmp_path, monkeypatch):
+    # flag → kwarg wiring (no live DB): --no-concurrently flips the api
+    # default, --statement-timeout carries through; without the flags
+    # the api defaults (concurrently=True, statement_timeout=None) hold
+    _unit_models(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_push(*a, **k):
+        seen.update(k)
+        return Report()
+
+    monkeypatch.setattr(sqlpush.cli.api, "push", fake_push)
+    r = runner.invoke(
+        app,
+        [
+            "push",
+            "unit_models:metadata",
+            "--no-concurrently",
+            "--statement-timeout",
+            "3.5",
+            *UNIT_DSN,
+        ],
+    )
+    assert r.exit_code == 0
+    assert seen["concurrently"] is False
+    assert seen["statement_timeout"] == 3.5
+
+    seen.clear()
+    r2 = runner.invoke(app, ["push", "unit_models:metadata", *UNIT_DSN])
+    assert r2.exit_code == 0
+    assert seen["concurrently"] is True
+    assert seen["statement_timeout"] is None
+
+
+def test_revision_no_concurrently_routes_to_api(tmp_path, monkeypatch):
+    _unit_models(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_revision(*a, **k):
+        seen.update(k)
+        return Path("0001_x.sql")
+
+    monkeypatch.setattr(sqlpush.cli.api, "revision", fake_revision)
+    r = runner.invoke(
+        app,
+        ["revision", "unit_models:metadata", "--ref-dsn", UNIT_DSN[1], "--no-concurrently"],
+    )
+    assert r.exit_code == 0
+    assert seen["concurrently"] is False
 
 
 # --- unit tests below: api.push monkeypatched, no live PostgreSQL ---
