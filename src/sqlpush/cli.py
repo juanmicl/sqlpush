@@ -42,6 +42,10 @@ ExcludeOpt = Annotated[list[str] | None, typer.Option("--exclude")]
 # exempts typer.Option for non-Path annotations. None default: lets the
 # verb tell "user passed --dir" apart from "use hook/default" resolution.
 DirOpt = Annotated[Path | None, typer.Option("--dir")]
+# Hook-location override, on EVERY verb (hook loading is shared
+# machinery like --dsn): flag > $SQLPUSH_HOOK > candidates, and an
+# explicit path that does not exist fails loud in the loader.
+HookOpt = Annotated[Path | None, typer.Option("--hook")]
 DEFAULT_CHAIN_DIR = Path("migrations/versions")
 
 
@@ -119,8 +123,9 @@ def diff(
     quiet: bool = typer.Option(False, "--quiet"),
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
+    hook_path: HookOpt = None,
 ):
-    hook = load_project_hook()
+    hook = load_project_hook(hook_path)
     md = _metadata(metadata_spec, hook)
     engine = _engine(dsn, hook)
     try:
@@ -145,8 +150,9 @@ def check(
     quiet: bool = typer.Option(False, "--quiet"),
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
+    hook_path: HookOpt = None,
 ):
-    hook = load_project_hook()
+    hook = load_project_hook(hook_path)
     md = _metadata(metadata_spec, hook)
     engine = _engine(dsn, hook)
     try:
@@ -187,8 +193,9 @@ def push(
     quiet: bool = typer.Option(False, "--quiet"),
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
+    hook_path: HookOpt = None,
 ):
-    hook = load_project_hook()
+    hook = load_project_hook(hook_path)
     md = _metadata(metadata_spec, hook)
     engine = _engine(dsn, hook)
     try:
@@ -264,9 +271,10 @@ def revision(
     no_concurrently: bool = typer.Option(False, "--no-concurrently"),
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
+    hook_path: HookOpt = None,
 ):
     """Generate the next migration file from models vs the reference DB."""
-    hook = load_project_hook()
+    hook = load_project_hook(hook_path)
     md = _metadata(metadata_spec, hook)
     # --ref-dsn: flag > hook.get_dsn(); NO DATABASE_URL fallback (the
     # reference DB is a different database from the push target —
@@ -305,9 +313,10 @@ def migrate(
     lock_timeout: float = typer.Option(5.0, "--lock-timeout"),
     statement_timeout: float | None = typer.Option(None, "--statement-timeout"),
     out_dir: DirOpt = None,
+    hook_path: HookOpt = None,
 ):
     """Replay pending migration files (gates + checksum bookkeeping)."""
-    hook = load_project_hook()
+    hook = load_project_hook(hook_path)
     engine = _engine(dsn, hook)
     try:
         report = api.migrate(
@@ -336,9 +345,10 @@ def stamp(
     dsn: str | None = typer.Option(None),
     force: bool = typer.Option(False, "--force"),
     out_dir: DirOpt = None,
+    hook_path: HookOpt = None,
 ):
     """Adopt an existing DB: register chain files without executing SQL."""
-    hook = load_project_hook()
+    hook = load_project_hook(hook_path)
     engine = _engine(dsn, hook)
     try:
         report = api.stamp(engine, chain_dir=_resolve_dir(out_dir, hook), force=force)

@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 import sqlpush.cli
 from sqlpush.cli import app
+from sqlpush.hook import load_project_hook
 from sqlpush.types import MigrateReport, Plan, SqlpushError
 
 runner = CliRunner()
@@ -22,6 +23,9 @@ DSN = os.environ.get(
 HOOK_DSN = "postgresql+psycopg://u:p@localhost:1/hookunit"
 ENV_DSN = "postgresql+psycopg://u:p@localhost:1/envunit"
 FLAG_DSN = "postgresql+psycopg://u:p@localhost:1/flagunit"
+CUSTOM_HOOK_DSN = "postgresql+psycopg://u:p@localhost:1/customhook"
+ENV_HOOK_DSN = "postgresql+psycopg://u:p@localhost:1/envhook"
+FLAG_HOOK_DSN = "postgresql+psycopg://u:p@localhost:1/flaghook"
 
 # a parseable-but-never-connected DSN: create_engine is faked in the
 # DB-free tests; only the string value matters
@@ -36,6 +40,14 @@ FULL_HOOK = (
     "    return md\n"
     "CHAIN_DIR = 'migrations/chain'\n"
 )
+# the same full hook, distinguishable by DSN (for the override tests)
+CUSTOM_HOOK = FULL_HOOK.replace(HOOK_DSN, CUSTOM_HOOK_DSN)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_hook_env(monkeypatch):
+    # ambient SQLPUSH_HOOK must never leak into discovery/override tests
+    monkeypatch.delenv("SQLPUSH_HOOK", raising=False)
 
 
 class _FakeEngine:
@@ -108,6 +120,215 @@ def test_hook_revision_ref_dsn_and_chain_dir(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert seen["dsn"] == HOOK_DSN
     assert seen["out_dir"] == Path("migrations/chain")
+
+
+# --- two candidate locations: migrations/ first, root fallback ---------------
+# (the existing root-location tests below/above now double as the
+# backwards-compat fallback pin — they are deliberately NOT rewritten)
+
+
+def test_hook_discovered_from_migrations_dir(tmp_path, monkeypatch):
+    # preferred location: migrations/sqlpush.py (lives next to the
+    # chain); root sqlpush.py absent — full verb resolution from there
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text(FULL_HOOK)
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+
+    def fake_plan(md, engine, **kw):
+        seen["md"] = md
+        return Plan()  # clean → exit 0
+
+    monkeypatch.setattr(sqlpush.cli.api, "plan", fake_plan)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    r = runner.invoke(app, ["check"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == HOOK_DSN
+    assert "hook_marker_tbl" in seen["md"].tables
+
+
+def test_migrations_candidate_wins_over_root(tmp_path, monkeypatch):
+    # BOTH candidates present → first match wins: migrations/. The two
+    # hooks are distinguishable by DSN so precedence is pinned exactly.
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    root_hook_dsn = "postgresql+psycopg://u:p@localhost:1/roothook"
+    (mig / "sqlpush.py").write_text(f"def get_dsn():\n    return {HOOK_DSN!r}\n")
+    (tmp_path / "sqlpush.py").write_text(f"def get_dsn():\n    return {root_hook_dsn!r}\n")
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+    monkeypatch.setattr(sqlpush.cli.api, "migrate", lambda *a, **k: MigrateReport())
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == HOOK_DSN  # the migrations/ one, not the root's
+
+
+def test_error_messages_name_the_loaded_file(tmp_path, monkeypatch):
+    # correctness req 1: typed errors must name the file that ACTUALLY
+    # loaded, in the candidate spelling (tests assert it exactly)
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text("CHAIN_DIR = 'x'\n")  # no get_dsn
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SqlpushError)
+    assert str(r.exception).startswith("migrations/sqlpush.py: missing get_dsn()")
+
+
+def test_raised_error_names_the_loaded_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text("def get_dsn():\n    raise RuntimeError('boom-mig')\n")
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SqlpushError)
+    assert str(r.exception).startswith("migrations/sqlpush.py: get_dsn() raised:")
+    assert "boom-mig" in str(r.exception)
+
+
+def test_sys_path_appends_cwd_not_hook_dir(tmp_path, monkeypatch):
+    # correctness req 2: whatever candidate loaded, the sys.path append
+    # is the CWD (so the consumer's package imports resolve) — never
+    # the hook's own directory (migrations/ on sys.path would be wrong)
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text("def get_dsn():\n    return 'postgresql://x'\n")
+    hook = load_project_hook()
+    assert hook is not None
+    assert sys.path[-1] == str(tmp_path)  # cwd appended LAST
+    assert str(mig) not in sys.path  # never the hook's own directory
+
+
+# --- explicit override: --hook flag / SQLPUSH_HOOK ----------------------------
+# adjudicated defaults+override design (the alembic -c equivalent):
+# --hook > SQLPUSH_HOOK > candidates; explicit paths FAIL LOUD — an
+# instruction that does not resolve is an error, never a fallback.
+
+
+def test_hook_flag_loads_custom_path(tmp_path, monkeypatch):
+    # --hook names any location: the flag alone loads the file and full
+    # verb resolution works from it (relative path resolves against the
+    # CWD). The root candidate is ALSO present, carrying a different
+    # DSN — so this pins flag > candidates directly, not just by
+    # transitivity through the env-var test.
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    (custom / "hook.py").write_text(CUSTOM_HOOK)
+    (tmp_path / "sqlpush.py").write_text(FULL_HOOK)  # candidate temptation
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+
+    def fake_plan(md, engine, **kw):
+        seen["md"] = md
+        return Plan()  # clean → exit 0
+
+    monkeypatch.setattr(sqlpush.cli.api, "plan", fake_plan)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    r = runner.invoke(app, ["check", "--hook", "custom/hook.py"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == CUSTOM_HOOK_DSN  # the flag's, not the root candidate's
+    assert "hook_marker_tbl" in seen["md"].tables
+
+
+def test_hook_flag_beats_env_var(tmp_path, monkeypatch):
+    # both override channels set, distinguishable hooks → flag's wins
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "envhook.py").write_text(f"def get_dsn():\n    return {ENV_HOOK_DSN!r}\n")
+    (tmp_path / "flaghook.py").write_text(f"def get_dsn():\n    return {FLAG_HOOK_DSN!r}\n")
+    monkeypatch.setenv("SQLPUSH_HOOK", str(tmp_path / "envhook.py"))  # absolute
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+    monkeypatch.setattr(sqlpush.cli.api, "migrate", lambda *a, **k: MigrateReport())
+    r = runner.invoke(app, ["migrate", "--hook", "flaghook.py"])  # relative to CWD
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == FLAG_HOOK_DSN
+
+
+def test_hook_env_beats_candidates(tmp_path, monkeypatch):
+    # env names a hook while the root candidate ALSO exists → env's wins
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sqlpush.py").write_text(FULL_HOOK)
+    (tmp_path / "envhook.py").write_text(f"def get_dsn():\n    return {ENV_HOOK_DSN!r}\n")
+    monkeypatch.setenv("SQLPUSH_HOOK", "envhook.py")  # relative, CWD
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+    monkeypatch.setattr(sqlpush.cli.api, "migrate", lambda *a, **k: MigrateReport())
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == ENV_HOOK_DSN
+
+
+def test_hook_env_empty_string_means_unset(tmp_path, monkeypatch):
+    # real-CI case (systems export empty vars): SQLPUSH_HOOK="" must
+    # behave as unset — discovery proceeds and the root candidate
+    # loads, pinned via its distinguishable DSN (an empty Path would
+    # otherwise fail loud as ".: file not found")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sqlpush.py").write_text(FULL_HOOK)
+    monkeypatch.setenv("SQLPUSH_HOOK", "")
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+    monkeypatch.setattr(sqlpush.cli.api, "migrate", lambda *a, **k: MigrateReport())
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == HOOK_DSN
+
+
+def test_hook_flag_missing_file_fails_loud(tmp_path, monkeypatch):
+    # explicit = fail-loud: even with a candidate that WOULD load, the
+    # unresolvable path errors — never a silent fallback
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sqlpush.py").write_text(FULL_HOOK)  # fallback temptation
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+    monkeypatch.setattr(sqlpush.cli.api, "migrate", lambda *a, **k: MigrateReport())
+    r = runner.invoke(app, ["migrate", "--hook", "missing.py"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SqlpushError)
+    assert str(r.exception).startswith("missing.py: file not found")
+    assert "dsn" not in seen  # nothing loaded, nothing resolved
+
+
+def test_hook_env_missing_file_fails_loud(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SQLPUSH_HOOK", "missing.py")
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SqlpushError)
+    assert str(r.exception).startswith("missing.py: file not found")
+
+
+def test_custom_path_hook_error_names_loaded_file(tmp_path, monkeypatch):
+    # errors from an overridden hook name the loaded file in the GIVEN
+    # spelling (same message contract as the candidates)
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    (custom / "hook.py").write_text("CHAIN_DIR = 'x'\n")  # no get_dsn
+    r = runner.invoke(app, ["migrate", "--hook", "custom/hook.py"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SqlpushError)
+    assert str(r.exception).startswith("custom/hook.py: missing get_dsn()")
+
+
+def test_override_sys_path_appends_cwd_not_hook_dir(tmp_path, monkeypatch):
+    # same pin as discovery, via the override channel: the sys.path
+    # append is the CWD, never the loaded hook's own directory
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / "custom"
+    custom.mkdir()
+    (custom / "hook.py").write_text("def get_dsn():\n    return 'postgresql://x'\n")
+    hook = load_project_hook("custom/hook.py")
+    assert hook is not None
+    assert sys.path[-1] == str(tmp_path)  # cwd appended LAST
+    assert str(custom) not in sys.path  # never the hook's own directory
 
 
 # --- precedence: flag > hook > env ------------------------------------------

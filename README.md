@@ -169,12 +169,17 @@ the workflows.
 
 ## Project hook
 
-Drop a `sqlpush.py` in your repo root (the alembic `env.py` /
-pytest `conftest.py` pattern) and the CLI stops needing flags,
-specs and env vars:
+Drop a `sqlpush.py` where sqlpush can find it (the alembic `env.py` /
+pytest `conftest.py` pattern) and the CLI stops needing flags, specs
+and env vars. Two discovered locations, first match wins — or name
+any file explicitly with `--hook`/`$SQLPUSH_HOOK`:
+
+1. `migrations/sqlpush.py` — preferred: it lives next to the chain,
+   no repo-root clutter.
+2. `sqlpush.py` — repo root, kept as the backwards-compat fallback.
 
 ```python
-# sqlpush.py — in your repo root
+# migrations/sqlpush.py — the preferred location
 def get_metadata():  # REQUIRED for diff/check/push/revision
     from myapp.models import metadata
 
@@ -194,23 +199,33 @@ With that file in place, `uv run sqlpush revision -m "change"` just
 works: no `--dsn`, no `module:attribute`, no credentials on the
 command line, no PYTHONPATH. Inputs resolve with a fixed precedence:
 
-| input | explicit flag | `sqlpush.py` | fallback |
+| input | explicit flag | hook | fallback |
 | --- | --- | --- | --- |
 | `--dsn` / `--ref-dsn` | wins | `get_dsn()` | `$DATABASE_URL`, only without a hook and never for `--ref-dsn` |
 | `module:attribute` (diff/check/push/revision) | wins | `get_metadata()` | usage error |
 | `--dir` (revision/migrate/stamp) | wins | `CHAIN_DIR` | `migrations/versions` |
+| which file is the hook | `--hook PATH` | — | `$SQLPUSH_HOOK`, else first match: `migrations/sqlpush.py`, then root `sqlpush.py` |
+
+The hook's location is the alembic `-c` equivalent: `--hook` >
+`$SQLPUSH_HOOK` > discovery, any location you want (relative paths
+resolve against the CWD) — and the explicit forms fail loud, with an
+error naming that path (`custom/hook.py: file not found`)
+instead of falling back to the discovered candidates.
 
 A hook that is missing a member a verb needs — or whose
 `get_dsn()`/`get_metadata()` raises — fails with a typed error naming
-the file and the member (`sqlpush.py: missing get_dsn()`), never a
-traceback. Without a `sqlpush.py`, every verb behaves exactly as
-before.
+the file that actually loaded and the member
+(`migrations/sqlpush.py: missing get_dsn()`), never a traceback.
+Without a hook, every verb behaves exactly as before.
 
 One deliberate detail: on discovering the hook, sqlpush **appends**
-your CWD to `sys.path` instead of prepending it. A file named
+your CWD to `sys.path` instead of prepending it — whatever location
+the hook loaded from, never the hook's own directory. A root
 `sqlpush.py` would otherwise shadow the installed package the moment
 you ran the CLI from your repo root; appending guarantees the real
-package always wins, and the hook is loaded by path only.
+package always wins, and the hook itself is loaded by path only (the
+`migrations/` candidate has no shadowing concern but loads the same
+way).
 
 ## Exit codes
 
@@ -243,8 +258,10 @@ The knobs, per verb:
 | `migrate` | `--allow-destructive` `--advisory-wait` `--lock-timeout` `--statement-timeout` `--dir` |
 | `stamp` | `--force` `--dir` |
 
-Every verb except `revision` takes `--dsn` (or `$DATABASE_URL`, or
-the project hook's `get_dsn()`). `revision` takes `--ref-dsn` — or
+Every verb takes `--hook PATH` (or `$SQLPUSH_HOOK`) to name the hook
+file explicitly. Every verb except `revision` takes `--dsn` (or
+`$DATABASE_URL`, or the project hook's `get_dsn()`). `revision`
+takes `--ref-dsn` — or
 the hook — with no env fallback: the reference DB is a different
 database from the push target. `diff`, `check`,
 `push` and `revision` also take repeatable `--schema` / `--exclude`.
