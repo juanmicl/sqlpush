@@ -12,7 +12,7 @@ back to the repo-root ``sqlpush.py`` (backwards compat); first match
 wins. An explicit override — the ``--hook`` flag or the
 ``SQLPUSH_HOOK`` env var (the alembic ``-c`` equivalent) — names any
 file instead, and is fail-loud: a path that does not exist raises a
-:class:`HookError` naming that exact path, never a silent fallback to
+:class:`HookError` naming that path, never a silent fallback to
 the candidates. Precedence: flag > env > candidates.
 
 Loading is BY PATH (``spec_from_file_location``), never by module
@@ -58,7 +58,7 @@ def load_project_hook(hook_path: Path | str | None = None) -> ModuleType | None:
     Precedence: ``hook_path`` (the ``--hook`` flag) > ``$SQLPUSH_HOOK``
     > the first existing candidate (``migrations/sqlpush.py``, then the
     repo root). An explicit path (flag or env) is fail-loud: when it
-    does not exist a :class:`HookError` names that exact path — an
+    does not exist a :class:`HookError` names that path — an
     explicit instruction must not silently fall back to discovery.
     Relative paths resolve against the CWD. On success the CWD is
     appended to ``sys.path`` (never inserted at the front, and never

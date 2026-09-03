@@ -209,7 +209,7 @@ command line, no PYTHONPATH. Inputs resolve with a fixed precedence:
 The hook's location is the alembic `-c` equivalent: `--hook` >
 `$SQLPUSH_HOOK` > discovery, any location you want (relative paths
 resolve against the CWD) — and the explicit forms fail loud, with an
-error naming that exact path (`custom/hook.py: file not found`)
+error naming that path (`custom/hook.py: file not found`)
 instead of falling back to the discovered candidates.
 
 A hook that is missing a member a verb needs — or whose

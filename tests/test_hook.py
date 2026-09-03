@@ -212,13 +212,16 @@ def test_sys_path_appends_cwd_not_hook_dir(tmp_path, monkeypatch):
 
 
 def test_hook_flag_loads_custom_path(tmp_path, monkeypatch):
-    # --hook names any location: no candidates present, the flag alone
-    # loads the file and full verb resolution works from it (relative
-    # path resolves against the CWD)
+    # --hook names any location: the flag alone loads the file and full
+    # verb resolution works from it (relative path resolves against the
+    # CWD). The root candidate is ALSO present, carrying a different
+    # DSN — so this pins flag > candidates directly, not just by
+    # transitivity through the env-var test.
     monkeypatch.chdir(tmp_path)
     custom = tmp_path / "custom"
     custom.mkdir()
     (custom / "hook.py").write_text(CUSTOM_HOOK)
+    (tmp_path / "sqlpush.py").write_text(FULL_HOOK)  # candidate temptation
     seen: dict = {}
     _capture_engine(monkeypatch, seen)
 
@@ -230,7 +233,7 @@ def test_hook_flag_loads_custom_path(tmp_path, monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     r = runner.invoke(app, ["check", "--hook", "custom/hook.py"])
     assert r.exit_code == 0, r.output
-    assert seen["dsn"] == CUSTOM_HOOK_DSN
+    assert seen["dsn"] == CUSTOM_HOOK_DSN  # the flag's, not the root candidate's
     assert "hook_marker_tbl" in seen["md"].tables
 
 
@@ -260,6 +263,22 @@ def test_hook_env_beats_candidates(tmp_path, monkeypatch):
     r = runner.invoke(app, ["migrate"])
     assert r.exit_code == 0, r.output
     assert seen["dsn"] == ENV_HOOK_DSN
+
+
+def test_hook_env_empty_string_means_unset(tmp_path, monkeypatch):
+    # real-CI case (systems export empty vars): SQLPUSH_HOOK="" must
+    # behave as unset — discovery proceeds and the root candidate
+    # loads, pinned via its distinguishable DSN (an empty Path would
+    # otherwise fail loud as ".: file not found")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sqlpush.py").write_text(FULL_HOOK)
+    monkeypatch.setenv("SQLPUSH_HOOK", "")
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+    monkeypatch.setattr(sqlpush.cli.api, "migrate", lambda *a, **k: MigrateReport())
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == HOOK_DSN
 
 
 def test_hook_flag_missing_file_fails_loud(tmp_path, monkeypatch):

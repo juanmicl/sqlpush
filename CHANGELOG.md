@@ -23,7 +23,7 @@ the project follows [Semantic Versioning](https://semver.org/).
   any location (relative paths resolve against the CWD). Precedence:
   `--hook` > `SQLPUSH_HOOK` > discovery (`migrations/sqlpush.py`,
   then root `sqlpush.py`). An explicit path that does not exist
-  fails as a typed error naming that exact path (`custom/hook.py:
+  fails as a typed error naming that path (`custom/hook.py:
   file not found`, exit 1) — never a silent fallback to the
   discovered candidates — and errors from an overridden hook name
   the loaded file in the given spelling.
