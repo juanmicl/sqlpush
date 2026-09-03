@@ -175,15 +175,19 @@ specs and env vars:
 
 ```python
 # sqlpush.py — in your repo root
-def get_metadata():          # REQUIRED for diff/check/push/revision
+def get_metadata():  # REQUIRED for diff/check/push/revision
     from myapp.models import metadata
-    return metadata          # -> a populated MetaData
 
-def get_dsn() -> str:        # REQUIRED for every verb
+    return metadata  # -> a populated MetaData
+
+
+def get_dsn() -> str:  # REQUIRED for every verb
     from myapp.settings import DATABASE_URL
-    return DATABASE_URL      # -> a full psycopg DSN
 
-CHAIN_DIR = "migrations/chain"   # OPTIONAL — default for --dir
+    return DATABASE_URL  # -> a full psycopg DSN
+
+
+CHAIN_DIR = "migrations/chain"  # OPTIONAL — default for --dir
 ```
 
 With that file in place, `uv run sqlpush revision -m "change"` just
