@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 import sqlpush.cli
 from sqlpush.cli import app
+from sqlpush.hook import load_project_hook
 from sqlpush.types import MigrateReport, Plan, SqlpushError
 
 runner = CliRunner()
@@ -108,6 +109,89 @@ def test_hook_revision_ref_dsn_and_chain_dir(tmp_path, monkeypatch):
     assert r.exit_code == 0, r.output
     assert seen["dsn"] == HOOK_DSN
     assert seen["out_dir"] == Path("migrations/chain")
+
+
+# --- two candidate locations: migrations/ first, root fallback ---------------
+# (the existing root-location tests below/above now double as the
+# backwards-compat fallback pin — they are deliberately NOT rewritten)
+
+
+def test_hook_discovered_from_migrations_dir(tmp_path, monkeypatch):
+    # preferred location: migrations/sqlpush.py (lives next to the
+    # chain); root sqlpush.py absent — full verb resolution from there
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text(FULL_HOOK)
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+
+    def fake_plan(md, engine, **kw):
+        seen["md"] = md
+        return Plan()  # clean → exit 0
+
+    monkeypatch.setattr(sqlpush.cli.api, "plan", fake_plan)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    r = runner.invoke(app, ["check"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == HOOK_DSN
+    assert "hook_marker_tbl" in seen["md"].tables
+
+
+def test_migrations_candidate_wins_over_root(tmp_path, monkeypatch):
+    # BOTH candidates present → first match wins: migrations/. The two
+    # hooks are distinguishable by DSN so precedence is pinned exactly.
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    root_hook_dsn = "postgresql+psycopg://u:p@localhost:1/roothook"
+    (mig / "sqlpush.py").write_text(f"def get_dsn():\n    return {HOOK_DSN!r}\n")
+    (tmp_path / "sqlpush.py").write_text(f"def get_dsn():\n    return {root_hook_dsn!r}\n")
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)
+    monkeypatch.setattr(sqlpush.cli.api, "migrate", lambda *a, **k: MigrateReport())
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 0, r.output
+    assert seen["dsn"] == HOOK_DSN  # the migrations/ one, not the root's
+
+
+def test_error_messages_name_the_loaded_file(tmp_path, monkeypatch):
+    # correctness req 1: typed errors must name the file that ACTUALLY
+    # loaded, in the candidate spelling (tests assert it exactly)
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text("CHAIN_DIR = 'x'\n")  # no get_dsn
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SqlpushError)
+    assert str(r.exception).startswith("migrations/sqlpush.py: missing get_dsn()")
+
+
+def test_raised_error_names_the_loaded_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text("def get_dsn():\n    raise RuntimeError('boom-mig')\n")
+    r = runner.invoke(app, ["migrate"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SqlpushError)
+    assert str(r.exception).startswith("migrations/sqlpush.py: get_dsn() raised:")
+    assert "boom-mig" in str(r.exception)
+
+
+def test_sys_path_appends_cwd_not_hook_dir(tmp_path, monkeypatch):
+    # correctness req 2: whatever candidate loaded, the sys.path append
+    # is the CWD (so the consumer's package imports resolve) — never
+    # the hook's own directory (migrations/ on sys.path would be wrong)
+    monkeypatch.chdir(tmp_path)
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    (mig / "sqlpush.py").write_text("def get_dsn():\n    return 'postgresql://x'\n")
+    hook = load_project_hook()
+    assert hook is not None
+    assert sys.path[-1] == str(tmp_path)  # cwd appended LAST
+    assert str(mig) not in sys.path  # never the hook's own directory
 
 
 # --- precedence: flag > hook > env ------------------------------------------

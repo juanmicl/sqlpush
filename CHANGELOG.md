@@ -6,6 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Project hook discovery now checks `migrations/sqlpush.py` FIRST
+  (the preferred location — it lives next to the chain, no repo-root
+  clutter) and falls back to the repo-root `sqlpush.py` for backwards
+  compat; first match wins, so the root-only setups of 0.6.0 behave
+  identically. Typed hook errors name the file that actually loaded
+  in the matched candidate's spelling (`migrations/sqlpush.py:
+  missing get_dsn()`), whatever the loading location. `sys.path`
+  still appends the CWD — never the hook's own directory — so the
+  consumer's package imports resolve and the root hook can never
+  shadow the installed package. Without a hook, no behavior change.
+
 ## [0.6.0] - 2026-09-03
 
 ### Added
