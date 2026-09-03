@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-03
+
 ### Added
 
 - Project hook `sqlpush.py`: any verb run with a `sqlpush.py` in the
