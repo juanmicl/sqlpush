@@ -1,6 +1,6 @@
 [project]
 name = "sqlpush"
-version = "0.6.0"
+version = "0.7.0"
 description = "Schema lifecycle tool for production PostgreSQL/TimescaleDB on SQLAlchemy 2.0 (SQLModel included): diff, push and check schema drift straight from your models"
 readme = "README.md"
 authors = [
