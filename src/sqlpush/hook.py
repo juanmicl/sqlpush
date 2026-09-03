@@ -9,16 +9,19 @@ env/default); without the hook every verb behaves exactly as before.
 Discovery checks ``migrations/sqlpush.py`` first (the preferred
 location — it lives next to the chain, no root clutter) and falls
 back to the repo-root ``sqlpush.py`` (backwards compat); first match
-wins.
+wins. An explicit override — the ``--hook`` flag or the
+``SQLPUSH_HOOK`` env var (the alembic ``-c`` equivalent) — names any
+file instead, and is fail-loud: a path that does not exist raises a
+:class:`HookError` naming that exact path, never a silent fallback to
+the candidates. Precedence: flag > env > candidates.
 
 Loading is BY PATH (``spec_from_file_location``), never by module
 name: a file named ``sqlpush.py`` in the CWD would shadow the
 installed package if the CWD came first on ``sys.path`` — so the CWD
 is APPENDED (never ``insert(0)``), and always the CWD, never the
-loaded candidate's own directory (the append exists so the
-consumer's package imports resolve). This guarantees the package
-wins for normal imports while the hook itself is only ever loaded
-explicitly.
+loaded file's own directory (the append exists so the consumer's
+package imports resolve). This guarantees the package wins for
+normal imports while the hook itself is only ever loaded explicitly.
 
 Only typed :class:`SqlpushError`-family errors escape this module,
 always naming the file that actually loaded and the member involved.
@@ -35,33 +38,58 @@ from types import ModuleType
 from sqlpush.types import SqlpushError
 
 HOOK_FILENAME = "sqlpush.py"
+HOOK_ENV_VAR = "SQLPUSH_HOOK"
 # first match wins: migrations/ (next to the chain) preferred, the
 # repo root kept as the backwards-compat fallback
 CANDIDATES = (Path("migrations") / HOOK_FILENAME, Path(HOOK_FILENAME))
+# resolved loaded path -> the spelling it was named with (candidate or
+# override path): _hook_label uses it so override-loaded hooks error in
+# the GIVEN spelling, matching the candidate message contract
+_LOADED_LABELS: dict[Path, str] = {}
 
 
 class HookError(SqlpushError):
     """The project hook is broken or incomplete — names file + member."""
 
 
-def load_project_hook() -> ModuleType | None:
-    """Load the first existing hook candidate by path; ``None`` when absent.
+def load_project_hook(hook_path: Path | str | None = None) -> ModuleType | None:
+    """Load the project hook; ``None`` when nothing resolves.
 
-    ``migrations/sqlpush.py`` is checked before the repo-root
-    ``sqlpush.py`` — first match wins. On success the CWD is appended
-    to ``sys.path`` (never inserted at the front, and never the
-    candidate's own directory — see the module docstring). Any
+    Precedence: ``hook_path`` (the ``--hook`` flag) > ``$SQLPUSH_HOOK``
+    > the first existing candidate (``migrations/sqlpush.py``, then the
+    repo root). An explicit path (flag or env) is fail-loud: when it
+    does not exist a :class:`HookError` names that exact path — an
+    explicit instruction must not silently fall back to discovery.
+    Relative paths resolve against the CWD. On success the CWD is
+    appended to ``sys.path`` (never inserted at the front, and never
+    the loaded file's own directory — see the module docstring). Any
     import-time failure is re-typed as :class:`HookError` naming the
-    candidate that failed, in the candidate spelling.
+    file that failed, in the spelling it was named with.
     """
+    explicit: Path | None = None
+    if hook_path is not None:
+        explicit = Path(hook_path)
+    else:
+        env_value = os.environ.get(HOOK_ENV_VAR)
+        if env_value:  # empty string ≡ unset
+            explicit = Path(env_value)
+    if explicit is not None:
+        if not explicit.is_file():
+            raise HookError(f"{explicit.as_posix()}: file not found")
+        return _load_hook_file(explicit)
     hook_file = next((p for p in CANDIDATES if p.is_file()), None)
     if hook_file is None:
         return None
+    return _load_hook_file(hook_file)
+
+
+def _load_hook_file(hook_file: Path) -> ModuleType:
     sys.path.append(os.getcwd())
     spec = importlib.util.spec_from_file_location("sqlpush_project_hook", hook_file)
     if spec is None or spec.loader is None:
         raise HookError(f"{hook_file.as_posix()}: cannot load (invalid module spec)")
     module = importlib.util.module_from_spec(spec)
+    _LOADED_LABELS[hook_file.resolve()] = hook_file.as_posix()
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
@@ -70,16 +98,19 @@ def load_project_hook() -> ModuleType | None:
 
 
 def _hook_label(hook: ModuleType) -> str:
-    """The CANDIDATES spelling of the loaded hook file (posix, portable).
+    """The spelling the loaded hook file was named with (posix, portable).
 
-    Errors must name the file that actually loaded, so map the loaded
-    module's ``__file__`` back to its candidate spelling; unknown
-    provenance degrades to the bare filename.
+    Errors must name the file that actually loaded: map the loaded
+    module's ``__file__`` back to its load-time spelling (candidate or
+    override path); unknown provenance degrades to the bare filename.
     """
     loaded_file = getattr(hook, "__file__", None)
     if not loaded_file:
         return HOOK_FILENAME
     loaded = Path(loaded_file).resolve()
+    label = _LOADED_LABELS.get(loaded)
+    if label is not None:
+        return label
     for candidate in CANDIDATES:
         if (Path.cwd() / candidate).resolve() == loaded:
             return candidate.as_posix()

@@ -18,6 +18,15 @@ the project follows [Semantic Versioning](https://semver.org/).
   still appends the CWD — never the hook's own directory — so the
   consumer's package imports resolve and the root hook can never
   shadow the installed package. Without a hook, no behavior change.
+- Hook location override (the alembic `-c` equivalent): `--hook PATH`
+  on every verb, or the `SQLPUSH_HOOK` env var, loads the hook from
+  any location (relative paths resolve against the CWD). Precedence:
+  `--hook` > `SQLPUSH_HOOK` > discovery (`migrations/sqlpush.py`,
+  then root `sqlpush.py`). An explicit path that does not exist
+  fails as a typed error naming that exact path (`custom/hook.py:
+  file not found`, exit 1) — never a silent fallback to the
+  discovered candidates — and errors from an overridden hook name
+  the loaded file in the given spelling.
 
 ## [0.6.0] - 2026-09-03
 
