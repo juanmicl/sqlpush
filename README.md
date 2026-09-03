@@ -167,6 +167,47 @@ run under `psql`. Schema change and data backfill ship as one file.
 The [chain guide](docs/the-chain.md) covers the format, the gates and
 the workflows.
 
+## Project hook
+
+Drop a `sqlpush.py` in your repo root (the alembic `env.py` /
+pytest `conftest.py` pattern) and the CLI stops needing flags,
+specs and env vars:
+
+```python
+# sqlpush.py — in your repo root
+def get_metadata():          # REQUIRED for diff/check/push/revision
+    from myapp.models import metadata
+    return metadata          # -> a populated MetaData
+
+def get_dsn() -> str:        # REQUIRED for every verb
+    from myapp.settings import DATABASE_URL
+    return DATABASE_URL      # -> a full psycopg DSN
+
+CHAIN_DIR = "migrations/chain"   # OPTIONAL — default for --dir
+```
+
+With that file in place, `uv run sqlpush revision -m "change"` just
+works: no `--dsn`, no `module:attribute`, no credentials on the
+command line, no PYTHONPATH. Inputs resolve with a fixed precedence:
+
+| input | explicit flag | `sqlpush.py` | fallback |
+| --- | --- | --- | --- |
+| `--dsn` / `--ref-dsn` | wins | `get_dsn()` | `$DATABASE_URL` (not for `--ref-dsn`) |
+| `module:attribute` (diff/check/push/revision) | wins | `get_metadata()` | usage error |
+| `--dir` (revision/migrate/stamp) | wins | `CHAIN_DIR` | `migrations/versions` |
+
+A hook that is missing a member a verb needs — or whose
+`get_dsn()`/`get_metadata()` raises — fails with a typed error naming
+the file and the member (`sqlpush.py: missing get_dsn()`), never a
+traceback. Without a `sqlpush.py`, every verb behaves exactly as
+before.
+
+One deliberate detail: on discovering the hook, sqlpush **appends**
+your CWD to `sys.path` instead of prepending it. A file named
+`sqlpush.py` would otherwise shadow the installed package the moment
+you ran the CLI from your repo root; appending guarantees the real
+package always wins, and the hook is loaded by path only.
+
 ## Exit codes
 
 | verb | 0 | 1 | 2 | 3 |
@@ -194,13 +235,14 @@ The knobs, per verb:
 | verb | flags |
 | --- | --- |
 | `push` | `--allow-destructive` `--safe-only` `--no-lock` `--lock-timeout` `--advisory-wait` `--no-concurrently` `--statement-timeout` |
-| `revision` | `--ref-dsn` (required) `-m/--message` `--no-concurrently` `--dir` |
+| `revision` | `--ref-dsn` (required without a hook) `-m/--message` `--no-concurrently` `--dir` |
 | `migrate` | `--allow-destructive` `--advisory-wait` `--lock-timeout` `--statement-timeout` `--dir` |
 | `stamp` | `--force` `--dir` |
 
-Every verb except `revision` takes `--dsn` (or `$DATABASE_URL`).
-`revision` requires `--ref-dsn`, with no env fallback: the reference
-DB is a different database from the push target. `diff`, `check`,
+Every verb except `revision` takes `--dsn` (or `$DATABASE_URL`, or
+the project hook's `get_dsn()`). `revision` takes `--ref-dsn` — or
+the hook — with no env fallback: the reference DB is a different
+database from the push target. `diff`, `check`,
 `push` and `revision` also take repeatable `--schema` / `--exclude`.
 Timeouts are seconds; a `lock_timeout` bounds how long a statement
 waits on a lock before failing, `statement_timeout` bounds each
