@@ -142,6 +142,26 @@ def test_no_hook_env_fallback_unchanged(tmp_path, monkeypatch):
     assert seen["dsn"] == ENV_DSN
 
 
+def test_revision_env_isolation_no_hook_no_ref_dsn(tmp_path, monkeypatch):
+    # pin: $DATABASE_URL must NEVER leak into the reference DSN. With
+    # no hook and no --ref-dsn, revision refuses with the remedy even
+    # though the env var is set — today this holds because cli.py
+    # checks ref_dsn is None BEFORE _engine is ever consulted; a
+    # refactor that reorders resolution would silently chain against
+    # the push target's env DSN (the wrong head).
+    monkeypatch.chdir(tmp_path)  # no sqlpush.py
+    monkeypatch.setenv("DATABASE_URL", ENV_DSN)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "models.py").write_text("from sqlalchemy import MetaData\nmetadata = MetaData()\n")
+    seen: dict = {}
+    _capture_engine(monkeypatch, seen)  # engine must never be created
+    r = runner.invoke(app, ["revision", "models:metadata"])
+    assert r.exit_code == 2
+    assert "--ref-dsn" in r.stderr
+    assert "sqlpush.py" in r.stderr  # the remedy names the hook too
+    assert "dsn" not in seen  # the env var never reached create_engine
+
+
 # --- shadowing pin: the package always wins ---------------------------------
 
 
@@ -149,7 +169,10 @@ def test_hook_never_shadows_package(tmp_path):
     # spec point 2: a file named sqlpush.py in the CWD must never shadow
     # the installed package. The CLI APPENDS the CWD to sys.path (never
     # insert(0)); replicated here in a fresh subprocess (console-script
-    # shape: the CWD is not already at sys.path[0]).
+    # shape: the CWD is not already at sys.path[0]). The second half
+    # drops the package from sys.modules and re-imports: with the CWD
+    # appended LAST the fresh PATH-ORDER resolution must still find the
+    # package — proving it is not a sys.modules cache short-circuit.
     (tmp_path / "sqlpush.py").write_text("def get_dsn():\n    return 'postgresql://x'\n")
     code = (
         "import sys, os\n"
@@ -161,15 +184,21 @@ def test_hook_never_shadows_package(tmp_path):
         "assert sys.path[-1] == os.getcwd(), 'appended LAST, never first'\n"
         "import sqlpush\n"
         "print(sqlpush.__file__)\n"
+        "del sys.modules['sqlpush']\n"
+        "import sqlpush\n"
+        "print(sqlpush.__file__)\n"
     )
     # check=False: the returncode assert below is the failure signal
     proc = subprocess.run(
         [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True, check=False
     )
     assert proc.returncode == 0, proc.stderr
-    resolved = Path(proc.stdout.strip()).resolve()
-    assert resolved != (tmp_path / "sqlpush.py").resolve()
-    assert resolved.name == "__init__.py" and resolved.parent.name == "sqlpush"
+    resolved_lines = [ln for ln in proc.stdout.strip().splitlines() if ln]
+    assert len(resolved_lines) == 2  # cached import + fresh re-import
+    for line in resolved_lines:
+        resolved = Path(line).resolve()
+        assert resolved != (tmp_path / "sqlpush.py").resolve()
+        assert resolved.name == "__init__.py" and resolved.parent.name == "sqlpush"
 
 
 # --- typed errors: names the file and the member -----------------------------
@@ -268,3 +297,29 @@ def test_hook_end_to_end_check_clean(tmp_path, monkeypatch, pg_engine):
     finally:
         with pg_engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS hook_hero"))
+
+
+@pytest.mark.pg
+def test_hook_laziness_get_metadata_never_called_for_migrate(tmp_path, monkeypatch, pg_engine):
+    # laziness pin: migrate never needs metadata, so get_metadata() is
+    # never called — a hook whose get_metadata RAISES still migrates
+    # cleanly (empty chain dir → idle run: versions table ensured,
+    # nothing applied). If resolution were eager, this would die with
+    # "sqlpush.py: get_metadata() raised".
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sqlpush.py").write_text(
+        f"DSN = {DSN!r}\n"
+        "def get_dsn():\n"
+        "    return DSN\n"
+        "def get_metadata():\n"
+        "    raise RuntimeError('get_metadata must not be called')\n"
+    )
+    (tmp_path / "chain").mkdir()  # empty: legitimate idle migrate
+    try:
+        r = runner.invoke(app, ["migrate", "--dir", str(tmp_path / "chain")])
+        assert r.exit_code == 0, r.output
+        assert "applied: 0" in r.output
+    finally:
+        # the idle run ensures the versions table in the shared dev DB
+        with pg_engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS sqlpush_versions"))
