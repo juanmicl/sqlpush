@@ -171,7 +171,8 @@ the workflows.
 
 Drop a `sqlpush.py` where sqlpush can find it (the alembic `env.py` /
 pytest `conftest.py` pattern) and the CLI stops needing flags, specs
-and env vars. Two candidate locations, first match wins:
+and env vars. Two discovered locations, first match wins — or name
+any file explicitly with `--hook`/`$SQLPUSH_HOOK`:
 
 1. `migrations/sqlpush.py` — preferred: it lives next to the chain,
    no repo-root clutter.
@@ -203,6 +204,13 @@ command line, no PYTHONPATH. Inputs resolve with a fixed precedence:
 | `--dsn` / `--ref-dsn` | wins | `get_dsn()` | `$DATABASE_URL`, only without a hook and never for `--ref-dsn` |
 | `module:attribute` (diff/check/push/revision) | wins | `get_metadata()` | usage error |
 | `--dir` (revision/migrate/stamp) | wins | `CHAIN_DIR` | `migrations/versions` |
+| which file is the hook | `--hook PATH` | — | `$SQLPUSH_HOOK`, else first match: `migrations/sqlpush.py`, then root `sqlpush.py` |
+
+The hook's location is the alembic `-c` equivalent: `--hook` >
+`$SQLPUSH_HOOK` > discovery, any location you want (relative paths
+resolve against the CWD) — and the explicit forms fail loud, with an
+error naming that exact path (`custom/hook.py: file not found`)
+instead of falling back to the discovered candidates.
 
 A hook that is missing a member a verb needs — or whose
 `get_dsn()`/`get_metadata()` raises — fails with a typed error naming
@@ -250,8 +258,10 @@ The knobs, per verb:
 | `migrate` | `--allow-destructive` `--advisory-wait` `--lock-timeout` `--statement-timeout` `--dir` |
 | `stamp` | `--force` `--dir` |
 
-Every verb except `revision` takes `--dsn` (or `$DATABASE_URL`, or
-the project hook's `get_dsn()`). `revision` takes `--ref-dsn` — or
+Every verb takes `--hook PATH` (or `$SQLPUSH_HOOK`) to name the hook
+file explicitly. Every verb except `revision` takes `--dsn` (or
+`$DATABASE_URL`, or the project hook's `get_dsn()`). `revision`
+takes `--ref-dsn` — or
 the hook — with no env fallback: the reference DB is a different
 database from the push target. `diff`, `check`,
 `push` and `revision` also take repeatable `--schema` / `--exclude`.
