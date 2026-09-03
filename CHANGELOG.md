@@ -6,6 +6,24 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Project hook `sqlpush.py`: any verb run with a `sqlpush.py` in the
+  CWD discovers it (the alembic `env.py` / pytest `conftest.py`
+  pattern; loaded by path, never by module name) and uses it for
+  defaults — `get_dsn()` for `--dsn`/`--ref-dsn`, `get_metadata()`
+  for the `module:attribute` positional (now optional on
+  `diff`/`check`/`push`/`revision`), `CHAIN_DIR` for `--dir`.
+  Precedence is explicit flag > hook > `$DATABASE_URL`/current
+  default; a hook that is missing a needed member, or whose
+  `get_dsn()`/`get_metadata()` raises, fails as a typed
+  `SqlpushError` naming the file and the member (exit 1, no
+  traceback). The CWD is appended — never prepended — to `sys.path`,
+  so the hook file can never shadow the installed `sqlpush` package.
+  Without a hook every verb behaves exactly as before: `uv run
+  sqlpush revision -m "change"` from the project root now needs no
+  `--dsn`, no `module:attribute` and no PYTHONPATH.
+
 ## [0.5.1] - 2026-09-02
 
 ### Added

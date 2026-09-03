@@ -24,6 +24,7 @@ from sqlalchemy.pool import NullPool
 
 from sqlpush import api
 from sqlpush.core.render import render
+from sqlpush.hook import hook_chain_dir, hook_dsn, hook_metadata, load_project_hook
 from sqlpush.types import (
     CheckResult,
     MetadataImportError,
@@ -38,8 +39,10 @@ app = typer.Typer(add_completion=False, help=__doc__ or "")
 SchemaOpt = Annotated[list[str] | None, typer.Option("--schema")]
 ExcludeOpt = Annotated[list[str] | None, typer.Option("--exclude")]
 # Path-typed options need the Annotated form: B008 (call in default) only
-# exempts typer.Option for non-Path annotations
-DirOpt = Annotated[Path, typer.Option("--dir")]
+# exempts typer.Option for non-Path annotations. None default: lets the
+# verb tell "user passed --dir" apart from "use hook/default" resolution.
+DirOpt = Annotated[Path | None, typer.Option("--dir")]
+DEFAULT_CHAIN_DIR = Path("migrations/versions")
 
 
 def _load_metadata(spec: str):
@@ -53,7 +56,28 @@ def _load_metadata(spec: str):
         raise MetadataImportError(f"cannot import {spec!r}: {exc}") from exc
 
 
-def _engine(dsn: str | None):
+def _metadata(metadata_spec: str | None, hook):
+    """Resolve the metadata source: flag > hook.get_metadata() > usage error.
+
+    The hook path returns the OBJECT itself (no module:attribute import
+    happens); the positional path is untouched.
+    """
+    if metadata_spec is not None:
+        return _load_metadata(metadata_spec)
+    if hook is not None:
+        return hook_metadata(hook)
+    typer.secho(
+        "metadata spec required: pass module:attribute or add get_metadata() to ./sqlpush.py",
+        fg="red",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
+def _engine(dsn: str | None, hook=None):
+    # precedence: explicit flag > hook.get_dsn() > $DATABASE_URL > error
+    if dsn is None and hook is not None:
+        dsn = hook_dsn(hook)
     dsn = dsn or os.environ.get("DATABASE_URL")
     if not dsn:
         typer.secho("no --dsn and no DATABASE_URL set", fg="red", err=True)
@@ -64,6 +88,13 @@ def _engine(dsn: str | None):
         # malformed DSN is a configuration error, not a verb error: exit 1
         typer.secho(f"invalid DSN: {exc}", fg="red", err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _resolve_dir(out_dir: Path | None, hook) -> Path:
+    """Resolve --dir: explicit flag > hook.CHAIN_DIR > current default."""
+    if out_dir is not None:
+        return out_dir
+    return Path(hook_chain_dir(hook, str(DEFAULT_CHAIN_DIR)))
 
 
 def _emit_json(plan) -> None:
@@ -81,7 +112,7 @@ def _risk_summary(p) -> None:
 
 @app.command()
 def diff(
-    metadata_spec: str = typer.Argument(..., help="module:metadata"),
+    metadata_spec: str | None = typer.Argument(None, help="module:metadata"),
     dsn: str | None = typer.Option(None),
     json_output: bool = typer.Option(False, "--json"),
     verbose: bool = typer.Option(False, "--verbose"),
@@ -89,8 +120,9 @@ def diff(
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
 ):
-    md = _load_metadata(metadata_spec)
-    engine = _engine(dsn)
+    hook = load_project_hook()
+    md = _metadata(metadata_spec, hook)
+    engine = _engine(dsn, hook)
     try:
         p = api.plan(md, engine, schemas=schema, exclude=exclude or ())
         if json_output:
@@ -106,7 +138,7 @@ def diff(
 
 @app.command()
 def check(
-    metadata_spec: str = typer.Argument(...),
+    metadata_spec: str | None = typer.Argument(None),
     dsn: str | None = typer.Option(None),
     json_output: bool = typer.Option(False, "--json"),
     verbose: bool = typer.Option(False, "--verbose"),
@@ -114,8 +146,9 @@ def check(
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
 ):
-    md = _load_metadata(metadata_spec)
-    engine = _engine(dsn)
+    hook = load_project_hook()
+    md = _metadata(metadata_spec, hook)
+    engine = _engine(dsn, hook)
     try:
         # plan ONCE and derive everything from that single object: a
         # second plan could observe a different DB state than the one
@@ -140,7 +173,7 @@ def check(
 
 @app.command()
 def push(
-    metadata_spec: str = typer.Argument(...),
+    metadata_spec: str | None = typer.Argument(None),
     dsn: str | None = typer.Option(None),
     json_output: bool = typer.Option(False, "--json"),
     allow_destructive: bool = typer.Option(False, "--allow-destructive"),
@@ -155,8 +188,9 @@ def push(
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
 ):
-    md = _load_metadata(metadata_spec)
-    engine = _engine(dsn)
+    hook = load_project_hook()
+    md = _metadata(metadata_spec, hook)
+    engine = _engine(dsn, hook)
     try:
         try:
             report = api.push(
@@ -223,25 +257,35 @@ def push(
 
 @app.command()
 def revision(
-    metadata_spec: str = typer.Argument(..., help="module:metadata"),
-    ref_dsn: str = typer.Option(..., "--ref-dsn"),
+    metadata_spec: str | None = typer.Argument(None, help="module:metadata"),
+    ref_dsn: str | None = typer.Option(None, "--ref-dsn"),
     message: str | None = typer.Option(None, "--message", "-m"),
-    out_dir: DirOpt = Path("migrations/versions"),
+    out_dir: DirOpt = None,
     no_concurrently: bool = typer.Option(False, "--no-concurrently"),
     schema: SchemaOpt = None,
     exclude: ExcludeOpt = None,
 ):
     """Generate the next migration file from models vs the reference DB."""
-    md = _load_metadata(metadata_spec)
-    # required --ref-dsn (no DATABASE_URL fallback): the reference DB is a
-    # different database from the push target — conflating them silently
-    # would chain against the wrong head
+    hook = load_project_hook()
+    md = _metadata(metadata_spec, hook)
+    # --ref-dsn: flag > hook.get_dsn(); NO DATABASE_URL fallback (the
+    # reference DB is a different database from the push target —
+    # conflating them silently would chain against the wrong head)
+    if ref_dsn is None and hook is not None:
+        ref_dsn = hook_dsn(hook)
+    if ref_dsn is None:
+        typer.secho(
+            "--ref-dsn is required (or add get_dsn() to ./sqlpush.py)",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     engine = _engine(ref_dsn)
     try:
         path = api.revision(
             md,
             engine,
-            out_dir=out_dir,
+            out_dir=_resolve_dir(out_dir, hook),
             message=message,
             concurrently=not no_concurrently,
             schemas=schema,
@@ -260,14 +304,15 @@ def migrate(
     advisory_wait: float = typer.Option(30.0, "--advisory-wait"),
     lock_timeout: float = typer.Option(5.0, "--lock-timeout"),
     statement_timeout: float | None = typer.Option(None, "--statement-timeout"),
-    out_dir: DirOpt = Path("migrations/versions"),
+    out_dir: DirOpt = None,
 ):
     """Replay pending migration files (gates + checksum bookkeeping)."""
-    engine = _engine(dsn)
+    hook = load_project_hook()
+    engine = _engine(dsn, hook)
     try:
         report = api.migrate(
             engine,
-            chain_dir=out_dir,
+            chain_dir=_resolve_dir(out_dir, hook),
             allow_destructive=allow_destructive,
             advisory_wait=advisory_wait,
             lock_timeout=lock_timeout,
@@ -290,12 +335,13 @@ def migrate(
 def stamp(
     dsn: str | None = typer.Option(None),
     force: bool = typer.Option(False, "--force"),
-    out_dir: DirOpt = Path("migrations/versions"),
+    out_dir: DirOpt = None,
 ):
     """Adopt an existing DB: register chain files without executing SQL."""
-    engine = _engine(dsn)
+    hook = load_project_hook()
+    engine = _engine(dsn, hook)
     try:
-        report = api.stamp(engine, chain_dir=out_dir, force=force)
+        report = api.stamp(engine, chain_dir=_resolve_dir(out_dir, hook), force=force)
     finally:
         engine.dispose()
     typer.echo(
