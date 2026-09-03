@@ -169,12 +169,16 @@ the workflows.
 
 ## Project hook
 
-Drop a `sqlpush.py` in your repo root (the alembic `env.py` /
-pytest `conftest.py` pattern) and the CLI stops needing flags,
-specs and env vars:
+Drop a `sqlpush.py` where sqlpush can find it (the alembic `env.py` /
+pytest `conftest.py` pattern) and the CLI stops needing flags, specs
+and env vars. Two candidate locations, first match wins:
+
+1. `migrations/sqlpush.py` — preferred: it lives next to the chain,
+   no repo-root clutter.
+2. `sqlpush.py` — repo root, kept as the backwards-compat fallback.
 
 ```python
-# sqlpush.py — in your repo root
+# migrations/sqlpush.py — the preferred location
 def get_metadata():  # REQUIRED for diff/check/push/revision
     from myapp.models import metadata
 
@@ -194,7 +198,7 @@ With that file in place, `uv run sqlpush revision -m "change"` just
 works: no `--dsn`, no `module:attribute`, no credentials on the
 command line, no PYTHONPATH. Inputs resolve with a fixed precedence:
 
-| input | explicit flag | `sqlpush.py` | fallback |
+| input | explicit flag | hook | fallback |
 | --- | --- | --- | --- |
 | `--dsn` / `--ref-dsn` | wins | `get_dsn()` | `$DATABASE_URL`, only without a hook and never for `--ref-dsn` |
 | `module:attribute` (diff/check/push/revision) | wins | `get_metadata()` | usage error |
@@ -202,15 +206,18 @@ command line, no PYTHONPATH. Inputs resolve with a fixed precedence:
 
 A hook that is missing a member a verb needs — or whose
 `get_dsn()`/`get_metadata()` raises — fails with a typed error naming
-the file and the member (`sqlpush.py: missing get_dsn()`), never a
-traceback. Without a `sqlpush.py`, every verb behaves exactly as
-before.
+the file that actually loaded and the member
+(`migrations/sqlpush.py: missing get_dsn()`), never a traceback.
+Without a hook, every verb behaves exactly as before.
 
 One deliberate detail: on discovering the hook, sqlpush **appends**
-your CWD to `sys.path` instead of prepending it. A file named
+your CWD to `sys.path` instead of prepending it — whatever location
+the hook loaded from, never the hook's own directory. A root
 `sqlpush.py` would otherwise shadow the installed package the moment
 you ran the CLI from your repo root; appending guarantees the real
-package always wins, and the hook is loaded by path only.
+package always wins, and the hook itself is loaded by path only (the
+`migrations/` candidate has no shadowing concern but loads the same
+way).
 
 ## Exit codes
 
