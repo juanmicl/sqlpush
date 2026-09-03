@@ -196,7 +196,7 @@ command line, no PYTHONPATH. Inputs resolve with a fixed precedence:
 
 | input | explicit flag | `sqlpush.py` | fallback |
 | --- | --- | --- | --- |
-| `--dsn` / `--ref-dsn` | wins | `get_dsn()` | `$DATABASE_URL` (not for `--ref-dsn`) |
+| `--dsn` / `--ref-dsn` | wins | `get_dsn()` | `$DATABASE_URL`, only without a hook and never for `--ref-dsn` |
 | `module:attribute` (diff/check/push/revision) | wins | `get_metadata()` | usage error |
 | `--dir` (revision/migrate/stamp) | wins | `CHAIN_DIR` | `migrations/versions` |
 
